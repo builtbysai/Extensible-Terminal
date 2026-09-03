@@ -21,7 +21,7 @@ Tmux server/socket/session behavior remains owned by the installed tmux program 
 
 ## Build and test
 
-The repository commits `Cargo.lock`; CI uses locked dependency resolution on Ubuntu and Windows. From `extensible-terminal/`:
+The repository commits `Cargo.lock`; CI uses locked dependency resolution on Ubuntu and Windows. From the repository root:
 
 ```sh
 cargo build --workspace --locked
@@ -49,7 +49,7 @@ The frontend's deterministic damage regression separately measures a one-cell up
 
 ## Install from source
 
-From a clean checkout, first complete the locked release build above. Then, from `extensible-terminal/`, install the CLI with Cargo using the committed lockfile:
+From a clean checkout, first complete the locked release build above. Then, from the repository root, install the CLI with Cargo using the committed lockfile:
 
 ```sh
 cargo install --path crates/terminal-cli --locked
