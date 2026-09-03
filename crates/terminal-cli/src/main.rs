@@ -31,6 +31,13 @@ use terminal_core::{
 use user_config::TrustedUserConfig;
 
 const SCROLLBACK_LIMIT: usize = 10_000;
+/// Fallback size used when the host terminal cannot report its own
+/// dimensions at startup (e.g. `TIOCGWINSZ` returns 0x0 because no window
+/// size has been set yet on the controlling tty). This mirrors the classic
+/// VT100 default that other terminal tools (vim, tmux, less, ...) fall back
+/// to in the same situation, so we start rendering instead of aborting; a
+/// real `Event::Resize` from the host corrects it as soon as one arrives.
+const DEFAULT_HOST_SIZE: (u16, u16) = (80, 24);
 const LOOP_IDLE: Duration = Duration::from_millis(5);
 const BRACKETED_PASTE_BEGIN: &[u8] = b"\x1b[200~";
 const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
@@ -482,7 +489,18 @@ fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
 
 fn host_size() -> Result<EndpointSize, Box<dyn std::error::Error>> {
     let (cols, rows) = terminal::size()?;
-    Ok(EndpointSize::new(cols, rows)?)
+    if let Ok(size) = EndpointSize::new(cols, rows) {
+        return Ok(size);
+    }
+    // A freshly-created or not-yet-sized controlling tty (some multiplexers,
+    // embedded/IDE terminals, and PTYs that haven't had TIOCSWINSZ applied
+    // yet all do this) reports 0x0 rather than a real size. Rather than
+    // aborting before a single frame is drawn, start at a sane default; the
+    // resize handler in `run()` already treats any subsequent invalid
+    // `Event::Resize` as a no-op, so this just extends that same tolerance
+    // to the initial size.
+    let (default_cols, default_rows) = DEFAULT_HOST_SIZE;
+    Ok(EndpointSize::new(default_cols, default_rows).expect("DEFAULT_HOST_SIZE is a valid non-zero size"))
 }
 
 fn build_endpoint(
