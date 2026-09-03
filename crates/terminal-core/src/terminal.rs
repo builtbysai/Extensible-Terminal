@@ -635,9 +635,14 @@ impl TerminalState {
             self.scroll_region_up(self.scroll_top, self.scroll_bottom, 1);
         } else if self.cursor.row + 1 < self.size.rows {
             self.cursor.row += 1;
-        } else {
-            self.scroll_region_up(0, self.size.rows - 1, 1);
         }
+        // Otherwise the cursor is already on the last physical row but below a
+        // custom scroll region's bottom margin (scroll_bottom < rows - 1). Per
+        // DECSTBM semantics, rows outside the active scroll region are never
+        // touched by a margin-relative scroll, and the cursor cannot move down
+        // further, so this is a no-op. Note this branch is unreachable when no
+        // custom region is set (scroll_bottom == rows - 1), since cursor.row
+        // then always equals scroll_bottom and takes the first branch instead.
     }
 
     fn reverse_index(&mut self) {
@@ -1931,6 +1936,27 @@ mod tests {
         assert_eq!(terminal.line_text(1).unwrap(), "mid2");
         assert_eq!(terminal.line_text(2).unwrap(), "    ");
         assert_eq!(terminal.line_text(3).unwrap(), "bot ");
+        assert_eq!(terminal.scrollback_len(), 0);
+    }
+
+    #[test]
+    fn line_feed_below_scroll_region_at_last_row_does_not_scroll_outside_margin() {
+        // Regression test: a scroll region smaller than the full screen, combined
+        // with the cursor parked below it (via CUP) on the physical last row, used
+        // to trigger a full-screen scroll on line feed -- corrupting rows outside
+        // the margin and even pushing an unrelated row into scrollback. Per
+        // DECSTBM semantics (and consistent with insert_lines/delete_lines, which
+        // already no-op when the cursor is outside the region), this must be a
+        // no-op: the cursor is already on the last row and outside the region.
+        let mut terminal = terminal(4, 4);
+        terminal.feed(b"top\x1b[2;1Hmid1\x1b[3;1Hmid2\x1b[4;1Hbot");
+        terminal.feed(b"\x1b[1;2r\x1b[4;1H\n");
+
+        assert_eq!(terminal.line_text(0).unwrap(), "top ");
+        assert_eq!(terminal.line_text(1).unwrap(), "mid1");
+        assert_eq!(terminal.line_text(2).unwrap(), "mid2");
+        assert_eq!(terminal.line_text(3).unwrap(), "bot ");
+        assert_eq!(terminal.cursor(), Cursor { row: 3, col: 0 });
         assert_eq!(terminal.scrollback_len(), 0);
     }
 
