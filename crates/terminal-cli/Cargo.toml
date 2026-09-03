@@ -1,0 +1,15 @@
+[package]
+name = "terminal-cli"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.85"
+
+[dependencies]
+crossterm = "0.29"
+local-pty = { path = "../local-pty" }
+terminal-core = { path = "../terminal-core" }
+user-config = { path = "../user-config" }
+
+[lints]
+workspace = true

@@ -1,0 +1,13 @@
+[package]
+name = "user-config"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.85"
+
+[dependencies]
+mlua = { version = "0.10.5", features = ["lua54", "vendored"] }
+terminal-core = { path = "../terminal-core" }
+
+[lints]
+workspace = true
