@@ -20,6 +20,11 @@ fn delayed_marker_path(label: &str) -> PathBuf {
     ))
 }
 
+// Only the Unix drop-contract test below uses this directly; the Windows
+// one needs wait_for_marker_while_draining_conpty instead (see its comment),
+// so this is unused -- and denied as dead code under -D warnings -- on a
+// Windows-only build.
+#[cfg(unix)]
 fn wait_for_marker(marker: &Path, timeout: Duration) {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline && !marker.exists() {
