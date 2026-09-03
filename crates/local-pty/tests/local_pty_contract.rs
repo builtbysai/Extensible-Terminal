@@ -20,10 +20,49 @@ fn delayed_marker_path(label: &str) -> PathBuf {
     ))
 }
 
+// Only the Unix drop-contract test below uses this directly; the Windows
+// one needs wait_for_marker_while_draining_conpty instead (see its comment),
+// so this is unused -- and denied as dead code under -D warnings -- on a
+// Windows-only build.
+#[cfg(unix)]
 fn wait_for_marker(marker: &Path, timeout: Duration) {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline && !marker.exists() {
         std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        marker.exists(),
+        "PTY child never signaled readiness at {}",
+        marker.display()
+    );
+}
+
+// Like `wait_for_marker`, but also drains the endpoint's output and answers
+// any ConPTY cursor-position query (DSR 6) while waiting. ConPTY may ask its
+// terminal peer for cursor state before a legacy console app (cmd.exe here)
+// becomes interactive -- see `native_windows_conpty_supports_bidirectional_io_and_exit`
+// for the same handshake. A caller that never reads from the endpoint at all
+// leaves that query unanswered forever, so ConPTY never lets the child
+// proceed and the marker is never written -- not a real hang in the product,
+// just an undrained handshake in the test itself.
+#[cfg(windows)]
+fn wait_for_marker_while_draining_conpty(
+    endpoint: &mut LocalPtyEndpoint,
+    marker: &Path,
+    timeout: Duration,
+) {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline && !marker.exists() {
+        match endpoint.poll_event().expect("poll ConPTY") {
+            Some(EndpointEvent::Output(bytes)) => {
+                if bytes.windows(4).any(|window| window == b"\x1b[6n") {
+                    endpoint
+                        .send(b"\x1b[1;1R")
+                        .expect("answer ConPTY cursor position query");
+                }
+            }
+            Some(_) | None => std::thread::sleep(Duration::from_millis(10)),
+        }
     }
     assert!(
         marker.exists(),
@@ -300,6 +339,38 @@ fn windows_final_output_is_delivered_before_exit() {
     );
 }
 
+// Writes a temporary .cmd script rather than passing a compound command
+// (nested quotes + `&` chaining + `>` redirection) as a single `cmd.exe /C`
+// argument. cmd.exe's handling of an /C argument that itself contains
+// embedded double quotes is notoriously inconsistent -- unlike the standard
+// MS C runtime argv-quoting rules portable-pty's CommandBuilder correctly
+// implements for building the process's command line, cmd.exe does its own,
+// separate (and much less predictable) stripping of the /C argument's outer
+// quotes, which can misparse a string containing further quotes inside it.
+// A script file sidesteps that whole class of quoting ambiguity: `/C` gets
+// one simple path argument (the same low-risk shape as the single-word `/C
+// echo ...` command the already-passing `windows_final_output_is_delivered_before_exit`
+// test uses), and the script's own body is parsed line-by-line like any
+// normal batch file, where quoting a redirection target is unambiguous.
+#[cfg(windows)]
+fn windows_drop_contract_script(ready_marker: &Path, survived_marker: &Path) -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock after Unix epoch")
+        .as_nanos();
+    let script_path = std::env::temp_dir().join(format!(
+        "extensible-terminal-drop-windows-script-{}-{nonce}.cmd",
+        std::process::id()
+    ));
+    let script = format!(
+        "echo READY>\"{}\"\r\nping -n 3 127.0.0.1 >nul\r\necho SURVIVED>\"{}\"\r\n",
+        ready_marker.display(),
+        survived_marker.display(),
+    );
+    std::fs::write(&script_path, script).expect("write windows drop-contract script");
+    script_path
+}
+
 #[cfg(windows)]
 #[test]
 fn dropping_running_windows_endpoint_terminates_and_reaps_tracked_child() {
@@ -307,19 +378,13 @@ fn dropping_running_windows_endpoint_terminates_and_reaps_tracked_child() {
     let survived_marker = delayed_marker_path("drop-windows-survived");
     let _ = std::fs::remove_file(&ready_marker);
     let _ = std::fs::remove_file(&survived_marker);
+    let script_path = windows_drop_contract_script(&ready_marker, &survived_marker);
     let spec = LocalProcessSpec::new("cmd.exe", size())
         .unwrap()
         .arg("/D")
         .arg("/Q")
         .arg("/C")
-        .arg(
-            "echo READY>\"%TERMINAL_DROP_READY%\" & ping -n 3 127.0.0.1 >nul & echo SURVIVED>\"%TERMINAL_DROP_SURVIVED%\"",
-        )
-        .with_env("TERMINAL_DROP_READY", ready_marker.clone().into_os_string())
-        .with_env(
-            "TERMINAL_DROP_SURVIVED",
-            survived_marker.clone().into_os_string(),
-        );
+        .arg(script_path.clone().into_os_string());
     let mut endpoint = LocalPtyEndpoint::new(
         EndpointId::new("local:windows-drop-contract").unwrap(),
         spec,
@@ -328,10 +393,11 @@ fn dropping_running_windows_endpoint_terminates_and_reaps_tracked_child() {
     assert_eq!(endpoint.state(), LocalPtyState::Running);
     let process_id = endpoint.process_id().expect("running ConPTY child has a PID");
 
-    wait_for_marker(&ready_marker, Duration::from_secs(5));
+    wait_for_marker_while_draining_conpty(&mut endpoint, &ready_marker, Duration::from_secs(5));
     drop(endpoint);
 
     assert_tracked_process_was_reaped(process_id);
     assert_delayed_marker_was_not_written(&survived_marker, Duration::from_secs(3));
     let _ = std::fs::remove_file(ready_marker);
+    let _ = std::fs::remove_file(script_path);
 }
