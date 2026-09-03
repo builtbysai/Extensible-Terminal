@@ -1,0 +1,51 @@
+name: Extensible Terminal CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: extensible-terminal-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.85 --profile minimal --component clippy
+      - name: Select Rust toolchain
+        run: rustup default 1.85
+      - name: Build release workspace
+        run: cargo build --workspace --release --locked
+      - name: Test workspace
+        run: cargo test --workspace --locked
+      - name: Record non-gating release metrics
+        if: runner.os == 'Linux'
+        run: cargo run --locked --release -p terminal-core --example release_metrics
+      - name: Smoke interactive terminal path
+        if: runner.os == 'Linux'
+        run: bash scripts/smoke-unix.sh
+      - name: Smoke interactive terminal path
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/smoke-windows.ps1
+      - name: Upload Windows smoke transcript
+        if: runner.os == 'Windows' && failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: extensible-terminal-windows-smoke
+          path: ${{ runner.temp }}/extensible-terminal-windows-smoke.txt
+          if-no-files-found: warn
+      - name: Lint workspace
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings

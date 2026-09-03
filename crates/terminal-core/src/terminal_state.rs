@@ -19,8 +19,9 @@ enum TabAction {
     Suppress,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum TabParserState {
+    #[default]
     Ground,
     Escape,
     Csi {
@@ -36,12 +37,6 @@ enum TabParserState {
         allow_bel: bool,
         escape_pending: bool,
     },
-}
-
-impl Default for TabParserState {
-    fn default() -> Self {
-        Self::Ground
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -150,7 +145,7 @@ impl TabStopTracker {
                 has_current,
                 (private, overflowed),
             ),
-            TabParserState::DiscardCsi => self.feed_discard_csi(byte),
+            TabParserState::DiscardCsi => Some(self.feed_discard_csi(byte)),
             TabParserState::ControlString {
                 allow_bel,
                 escape_pending,
@@ -304,21 +299,17 @@ impl TabStopTracker {
         None
     }
 
-    fn feed_discard_csi(&mut self, byte: u8) -> Option<TabAction> {
+    fn feed_discard_csi(&mut self, byte: u8) -> TabAction {
         match byte {
-            0x18 | 0x1a => {
-                self.parser = TabParserState::Ground;
-                Some(TabAction::Suppress)
-            }
             0x1b => {
                 self.parser = TabParserState::Escape;
-                Some(TabAction::StartEscape)
+                TabAction::StartEscape
             }
-            0x40..=0x7e => {
+            0x18 | 0x1a | 0x40..=0x7e => {
                 self.parser = TabParserState::Ground;
-                Some(TabAction::Suppress)
+                TabAction::Suppress
             }
-            _ => Some(TabAction::Suppress),
+            _ => TabAction::Suppress,
         }
     }
 
@@ -365,8 +356,9 @@ struct MouseModes {
     sgr_encoding: bool,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum MouseParserState {
+    #[default]
     Ground,
     Escape,
     Csi {
@@ -381,12 +373,6 @@ enum MouseParserState {
         allow_bel: bool,
         escape_pending: bool,
     },
-}
-
-impl Default for MouseParserState {
-    fn default() -> Self {
-        Self::Ground
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -749,6 +735,7 @@ impl TerminalState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::CellStyle;
 
     fn terminal() -> TerminalState {
         TerminalState::new(EndpointSize::new(8, 3).unwrap(), 2)
@@ -885,7 +872,7 @@ mod tests {
             state.feed(b"A\x1b[31");
             state.feed(&[cancel, b'X']);
             assert_eq!(state.line_text(0).unwrap(), "AX      ");
-            assert_eq!(state.cell(0, 1).unwrap().style, Default::default());
+            assert_eq!(state.cell(0, 1).unwrap().style, CellStyle::default());
         }
     }
 
@@ -920,7 +907,7 @@ mod tests {
         let mut state = terminal();
         state.feed(b"A\x1b[>cB\x1b[38:2::1:2:3mC");
         assert_eq!(state.line_text(0).unwrap(), "ABC     ");
-        assert_eq!(state.cell(0, 2).unwrap().style, Default::default());
+        assert_eq!(state.cell(0, 2).unwrap().style, CellStyle::default());
     }
 
     #[test]
@@ -942,7 +929,7 @@ mod tests {
         let mut sgr = vec!["31".to_owned()];
         sgr.extend((40..56).map(|value| value.to_string()));
         state.feed(format!("\x1b[{}mX", sgr.join(";")).as_bytes());
-        assert_eq!(state.cell(0, 0).unwrap().style, Default::default());
+        assert_eq!(state.cell(0, 0).unwrap().style, CellStyle::default());
     }
 
     #[test]
@@ -1031,7 +1018,7 @@ mod tests {
         assert_eq!(state.line_text(2).unwrap(), "    ");
 
         state.feed(b"abcdX");
-        assert_eq!(state.cell(0, 0).unwrap().style, Default::default());
+        assert_eq!(state.cell(0, 0).unwrap().style, CellStyle::default());
         assert_eq!(state.cell(1, 0).unwrap().character, 'X');
         assert_eq!(state.cursor(), Cursor { row: 1, col: 1 });
     }
@@ -1129,8 +1116,8 @@ mod tests {
         params.extend((0..16).map(|_| "0".to_owned()));
         let sequence = format!("\x1b[{}g", params.join(";"));
         let split = sequence.len() - 2;
-        state.feed(sequence[..split].as_bytes());
-        state.feed(sequence[split..].as_bytes());
+        state.feed(&sequence.as_bytes()[..split]);
+        state.feed(&sequence.as_bytes()[split..]);
         state.feed(b"\x1b[1;1H\t");
 
         assert_eq!(state.cursor().col, 8);
@@ -1213,7 +1200,7 @@ mod tests {
         csi.finish();
         csi.feed(b"B");
         assert_eq!(csi.line_text(0).unwrap(), "AB      ");
-        assert_eq!(csi.cell(0, 1).unwrap().style, Default::default());
+        assert_eq!(csi.cell(0, 1).unwrap().style, CellStyle::default());
 
         let mut control = terminal();
         control.feed(b"A\x1b]0;secret");
