@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="862" viewBox="0 0 1000 862" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace">
+<defs><pattern id="esl" width="4" height="4" patternUnits="userSpaceOnUse"><rect width="4" height="1" fill="#ffffff" opacity="0.018"/></pattern></defs>
+<rect x="1" y="1" width="998" height="860" rx="14" fill="#070b08" stroke="#1d3a26" stroke-width="2"/>
+<rect x="1" y="1" width="998" height="860" rx="14" fill="url(#esl)"/>
+<text x="90" y="56" fill="#e8f5ec" font-size="17" font-weight="bold">Extensible Terminal — runtime stack</text>
+<text x="90" y="80" fill="#8fa89a" font-size="12">minimal terminal runtime, rxi/lite-inspired small-core philosophy · Rust</text>
+<text x="910" y="56" text-anchor="end" fill="#ffb020" font-size="12">MVP · experiment</text>
+<text x="90" y="128" fill="#8fa89a" font-size="11.5">correctness in the core; everything else is an optional layer</text>
+
+<g>
+<rect x="90" y="150" width="820" height="150" rx="12" fill="#0a100c" stroke="#1d3a26" stroke-width="1.5"/>
+<rect x="90" y="150" width="8" height="150" rx="4" fill="#33ff66" opacity="0.55"/>
+<text x="114" y="184" fill="#e8f5ec" font-size="14.5" font-weight="bold">terminal-cli</text>
+<text x="232.39999999999998" y="184" fill="#8fa89a" font-size="11.5">— runnable cross-platform raw-mode frontend</text>
+<text x="114" y="212" fill="#8fa89a" font-size="11.5">PTY output parsed into TerminalState, rendered from the emulated grid</text><text x="114" y="230" fill="#8fa89a" font-size="11.5">keyboard input translated to terminal bytes · resize propagates both ways</text><text x="114" y="248" fill="#8fa89a" font-size="11.5">--ssh TARGET and --tmux SESSION select the system-client endpoints</text>
+</g>
+<g>
+<rect x="90" y="314" width="820" height="150" rx="12" fill="#0a100c" stroke="#1d3a26" stroke-width="1.5"/>
+<rect x="90" y="314" width="8" height="150" rx="4" fill="#33ff66" opacity="0.55"/>
+<text x="114" y="348" fill="#e8f5ec" font-size="14.5" font-weight="bold">terminal-core</text>
+<text x="241.1" y="348" fill="#8fa89a" font-size="11.5">— compact Rust VT core — correctness lives here</text>
+<text x="114" y="376" fill="#8fa89a" font-size="11.5">terminal state/grid · primary + alternate screens · DECSTBM scroll margins</text><text x="114" y="394" fill="#8fa89a" font-size="11.5">SGR · bounded scrollback · incremental UTF-8 · resize preservation</text><text x="114" y="412" fill="#8fa89a" font-size="11.5">Endpoint + Surface + Command + Annotation model · capability-scoped extensions</text>
+</g>
+<g>
+<rect x="90" y="478" width="820" height="150" rx="12" fill="#0a100c" stroke="#1d3a26" stroke-width="1.5"/>
+<rect x="90" y="478" width="8" height="150" rx="4" fill="#33ff66" opacity="0.55"/>
+<text x="114" y="512" fill="#e8f5ec" font-size="14.5" font-weight="bold">local-pty</text>
+<text x="206.3" y="512" fill="#8fa89a" font-size="11.5">— native PTY / ConPTY endpoint via portable-pty</text>
+<text x="114" y="540" fill="#8fa89a" font-size="11.5">raw bytes, resize, process lifecycle, exit metadata only</text><text x="114" y="558" fill="#8fa89a" font-size="11.5">SshPtyEndpoint: runs your system OpenSSH client inside the native PTY</text><text x="114" y="576" fill="#8fa89a" font-size="11.5">TmuxPtyEndpoint: runs your installed tmux client, attach-or-create</text>
+</g>
+
+<g>
+<rect x="90" y="642" width="820" height="96" rx="12" fill="#070b08" stroke="#1d3a26" stroke-width="1.2" stroke-dasharray="6 5"/>
+<text x="114" y="676" fill="#e8f5ec" font-size="13" font-weight="bold">user-config</text>
+<text x="215.0" y="676" fill="#8fa89a" font-size="11.5">— trusted user Lua: shell, env, initial dimensions (not the plugin API)</text>
+<text x="114" y="702" fill="#8fa89a" font-size="11.5">optional layer — workspace behavior, shell semantics, and extension policy stay out of the compact core</text>
+</g>
+<text x="90" y="774" fill="#e8f5ec" font-size="12.5" font-weight="bold">deliberately not reimplemented</text>
+<text x="90" y="798" fill="#8fa89a" font-size="11.5">SSH transport/auth stays owned by the installed OpenSSH client · tmux server behavior stays owned by the installed tmux program</text>
+<text x="90" y="838" fill="#4a5f52" font-size="11.5">cargo build --workspace --locked · crates: terminal-core / local-pty / user-config / terminal-cli</text>
+</svg>

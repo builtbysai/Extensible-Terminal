@@ -2,6 +2,10 @@
 
 A minimal terminal runtime inspired by rxi/lite's small-core philosophy. The implementation keeps terminal correctness in a compact Rust core and treats workspace behavior, shell semantics, and extension policy as optional layers.
 
+<p align="center">
+  <img src="assets/runtime-stack.svg" width="900" alt="Extensible Terminal runtime stack: terminal-cli, terminal-core, local-pty, and the optional user-config Lua layer">
+</p>
+
 ## What is implemented
 
 - `terminal-core`: public `Endpoint + Surface + Command + Annotation` model, bounded observer delivery, capability-scoped extensions, extension lifecycle policy, declarative composition, TERM/terminfo diagnostics, transition instrumentation, and a minimal VT terminal state/grid with primary and alternate screens, cursor movement, DECSTBM scroll margins with DECOM origin-relative addressing, basic SGR, bounded scrollback, incremental UTF-8 decoding, resize preservation, and bounded xterm mouse-mode negotiation state.
