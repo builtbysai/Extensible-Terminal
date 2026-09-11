@@ -150,3 +150,7 @@ Lua configuration is trusted user code and may use Lua standard libraries. Never
 - `docs/ARCHITECTURE.md`
 - `docs/SECURITY.md`
 - `docs/KNOWN_LIMITATIONS.md`
+
+---
+
+*Built by [Hans Sai](https://builtbysai.com).*
