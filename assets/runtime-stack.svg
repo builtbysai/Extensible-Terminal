@@ -1,41 +1,88 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="862" viewBox="0 0 1000 862" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace">
-<defs><pattern id="esl" width="4" height="4" patternUnits="userSpaceOnUse"><rect width="4" height="1" fill="#ffffff" opacity="0.018"/></pattern></defs>
-<rect x="1" y="1" width="998" height="860" rx="14" fill="#070b08" stroke="#1d3a26" stroke-width="2"/>
-<rect x="1" y="1" width="998" height="860" rx="14" fill="url(#esl)"/>
-<text x="90" y="56" fill="#e8f5ec" font-size="17" font-weight="bold">Extensible Terminal — runtime stack</text>
-<text x="90" y="80" fill="#8fa89a" font-size="12">minimal terminal runtime, rxi/lite-inspired small-core philosophy · Rust</text>
-<text x="910" y="56" text-anchor="end" fill="#ffb020" font-size="12">MVP · experiment</text>
-<text x="90" y="128" fill="#8fa89a" font-size="11.5">correctness in the core; everything else is an optional layer</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="924" viewBox="0 0 1000 924" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Helvetica, Arial, sans-serif">
+  <defs>
+    <style>
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace; }
+      .serif { font-family: Georgia, 'Times New Roman', serif; }
+    </style>
+  </defs>
 
-<g>
-<rect x="90" y="150" width="820" height="150" rx="12" fill="#0a100c" stroke="#1d3a26" stroke-width="1.5"/>
-<rect x="90" y="150" width="8" height="150" rx="4" fill="#33ff66" opacity="0.55"/>
-<text x="114" y="184" fill="#e8f5ec" font-size="14.5" font-weight="bold">terminal-cli</text>
-<text x="232.39999999999998" y="184" fill="#8fa89a" font-size="11.5">— runnable cross-platform raw-mode frontend</text>
-<text x="114" y="212" fill="#8fa89a" font-size="11.5">PTY output parsed into TerminalState, rendered from the emulated grid</text><text x="114" y="230" fill="#8fa89a" font-size="11.5">keyboard input translated to terminal bytes · resize propagates both ways</text><text x="114" y="248" fill="#8fa89a" font-size="11.5">--ssh TARGET and --tmux SESSION select the system-client endpoints</text>
-</g>
-<g>
-<rect x="90" y="314" width="820" height="150" rx="12" fill="#0a100c" stroke="#1d3a26" stroke-width="1.5"/>
-<rect x="90" y="314" width="8" height="150" rx="4" fill="#33ff66" opacity="0.55"/>
-<text x="114" y="348" fill="#e8f5ec" font-size="14.5" font-weight="bold">terminal-core</text>
-<text x="241.1" y="348" fill="#8fa89a" font-size="11.5">— compact Rust VT core — correctness lives here</text>
-<text x="114" y="376" fill="#8fa89a" font-size="11.5">terminal state/grid · primary + alternate screens · DECSTBM scroll margins</text><text x="114" y="394" fill="#8fa89a" font-size="11.5">SGR · bounded scrollback · incremental UTF-8 · resize preservation</text><text x="114" y="412" fill="#8fa89a" font-size="11.5">Endpoint + Surface + Command + Annotation model · capability-scoped extensions</text>
-</g>
-<g>
-<rect x="90" y="478" width="820" height="150" rx="12" fill="#0a100c" stroke="#1d3a26" stroke-width="1.5"/>
-<rect x="90" y="478" width="8" height="150" rx="4" fill="#33ff66" opacity="0.55"/>
-<text x="114" y="512" fill="#e8f5ec" font-size="14.5" font-weight="bold">local-pty</text>
-<text x="206.3" y="512" fill="#8fa89a" font-size="11.5">— native PTY / ConPTY endpoint via portable-pty</text>
-<text x="114" y="540" fill="#8fa89a" font-size="11.5">raw bytes, resize, process lifecycle, exit metadata only</text><text x="114" y="558" fill="#8fa89a" font-size="11.5">SshPtyEndpoint: runs your system OpenSSH client inside the native PTY</text><text x="114" y="576" fill="#8fa89a" font-size="11.5">TmuxPtyEndpoint: runs your installed tmux client, attach-or-create</text>
-</g>
+  <!-- paper -->
+  <rect x="1" y="1" width="998" height="922" rx="14" fill="#f6f3ec" stroke="#d9d2c0" stroke-width="2"/>
 
-<g>
-<rect x="90" y="642" width="820" height="96" rx="12" fill="#070b08" stroke="#1d3a26" stroke-width="1.2" stroke-dasharray="6 5"/>
-<text x="114" y="676" fill="#e8f5ec" font-size="13" font-weight="bold">user-config</text>
-<text x="215.0" y="676" fill="#8fa89a" font-size="11.5">— trusted user Lua: shell, env, initial dimensions (not the plugin API)</text>
-<text x="114" y="702" fill="#8fa89a" font-size="11.5">optional layer — workspace behavior, shell semantics, and extension policy stay out of the compact core</text>
-</g>
-<text x="90" y="774" fill="#e8f5ec" font-size="12.5" font-weight="bold">deliberately not reimplemented</text>
-<text x="90" y="798" fill="#8fa89a" font-size="11.5">SSH transport/auth stays owned by the installed OpenSSH client · tmux server behavior stays owned by the installed tmux program</text>
-<text x="90" y="838" fill="#4a5f52" font-size="11.5">cargo build --workspace --locked · crates: terminal-core / local-pty / user-config / terminal-cli</text>
+  <!-- header -->
+  <text x="64" y="52" fill="#71665a" font-size="12" letter-spacing="3.5" class="mono">EXTENSIBLE TERMINAL</text>
+  <text x="64" y="112" fill="#201d18" font-size="46" class="serif">Runtime stack.</text>
+  <text x="64" y="142" fill="#71665a" font-size="13.5">a minimal terminal runtime &#183; rxi/lite-inspired small-core philosophy &#183; Rust</text>
+
+  <!-- MVP badge -->
+  <g>
+    <rect x="792" y="28" width="144" height="34" rx="17" fill="none" stroke="#b8431f" stroke-width="1.4" stroke-dasharray="5 4"/>
+    <text x="864" y="50" text-anchor="middle" fill="#b8431f" font-size="12.5" class="mono">MVP &#183; experiment</text>
+  </g>
+
+  <!-- guiding line -->
+  <text x="64" y="186" fill="#201d18" font-size="13" font-weight="600">correctness in the core</text>
+  <text x="248" y="186" fill="#71665a" font-size="13">everything else is an optional layer &#183; bytes flow down, the emulated grid flows up</text>
+
+  <!-- configures rail: user-config -> terminal-cli -->
+  <line x1="40" y1="770" x2="40" y2="290" stroke="#a89c88" stroke-width="1.2" stroke-dasharray="5 4"/>
+  <polygon points="40,282 35,292 45,292" fill="#a89c88"/>
+  <rect x="28" y="452" width="24" height="164" fill="#f6f3ec"/>
+  <text x="40" y="534" transform="rotate(-90 40 534)" text-anchor="middle" fill="#71665a" font-size="10.5" letter-spacing="1.5" class="mono">configures terminal-cli</text>
+
+  <!-- LAYER 01 : terminal-cli -->
+  <g>
+    <rect x="64" y="208" width="872" height="150" rx="10" fill="#fffdf8" stroke="#d9d2c0" stroke-width="1.5"/>
+    <rect x="64" y="208" width="5" height="150" rx="2.5" fill="#b8431f"/>
+    <text x="96" y="246" fill="#8a8072" font-size="11" class="mono">01</text>
+    <text x="126" y="246" fill="#201d18" font-size="16" font-weight="700" class="mono">terminal-cli</text>
+    <text x="252" y="246" fill="#71665a" font-size="12.5">runnable cross-platform raw-mode frontend</text>
+    <text x="880" y="246" text-anchor="end" fill="#8a8072" font-size="11" class="mono">in: grid cells &#183; out: terminal bytes</text>
+    <text x="96" y="278" fill="#4a443b" font-size="13">PTY output is parsed into <tspan class="mono">TerminalState</tspan> and rendered from the emulated grid;</text>
+    <text x="96" y="300" fill="#4a443b" font-size="13">keyboard input is translated to terminal bytes, resize propagates to endpoint and grid.</text>
+    <text x="96" y="330" fill="#71665a" font-size="12" class="mono">--ssh TARGET &#183; --tmux SESSION &#183; --config PATH</text>
+  </g>
+
+  <!-- LAYER 02 : terminal-core -->
+  <g>
+    <rect x="64" y="374" width="872" height="172" rx="10" fill="#fffdf8" stroke="#d9d2c0" stroke-width="1.5"/>
+    <rect x="64" y="374" width="5" height="172" rx="2.5" fill="#b8431f"/>
+    <text x="96" y="412" fill="#8a8072" font-size="11" class="mono">02</text>
+    <text x="126" y="412" fill="#201d18" font-size="16" font-weight="700" class="mono">terminal-core</text>
+    <text x="262" y="412" fill="#71665a" font-size="12.5">the compact Rust core &#8212; correctness lives here</text>
+    <text x="880" y="412" text-anchor="end" fill="#8a8072" font-size="11" class="mono">bytes &#8594; TerminalState</text>
+    <text x="96" y="444" fill="#4a443b" font-size="13"><tspan class="mono">Endpoint + Surface + Command + Annotation</tspan> &#183; bounded observer delivery</text>
+    <text x="96" y="466" fill="#4a443b" font-size="13">capability-scoped extensions &#183; declarative composition &#183; TERM/terminfo diagnostics</text>
+    <text x="96" y="498" fill="#4a443b" font-size="13">VT state/grid: primary + alternate screens &#183; DECSTBM/DECOM &#183; SGR &#183; bounded scrollback</text>
+    <text x="96" y="520" fill="#4a443b" font-size="13">incremental UTF-8 &#183; resize preservation &#183; xterm mouse-mode negotiation</text>
+  </g>
+
+  <!-- LAYER 03 : local-pty -->
+  <g>
+    <rect x="64" y="562" width="872" height="150" rx="10" fill="#fffdf8" stroke="#d9d2c0" stroke-width="1.5"/>
+    <rect x="64" y="562" width="5" height="150" rx="2.5" fill="#b8431f"/>
+    <text x="96" y="600" fill="#8a8072" font-size="11" class="mono">03</text>
+    <text x="126" y="600" fill="#201d18" font-size="16" font-weight="700" class="mono">local-pty</text>
+    <text x="218" y="600" fill="#71665a" font-size="12.5">native PTY / ConPTY endpoints via portable-pty</text>
+    <text x="880" y="600" text-anchor="end" fill="#8a8072" font-size="11" class="mono">raw bytes only</text>
+    <text x="96" y="632" fill="#4a443b" font-size="13">raw bytes, resize, process lifecycle and exit metadata &#8212; nothing more</text>
+    <text x="96" y="654" fill="#4a443b" font-size="13"><tspan class="mono">SshPtyEndpoint</tspan> runs your system OpenSSH client inside the native PTY</text>
+    <text x="96" y="676" fill="#4a443b" font-size="13"><tspan class="mono">TmuxPtyEndpoint</tspan> runs your installed tmux client &#8212; attach-or-create session semantics</text>
+  </g>
+
+  <!-- user-config : optional trusted layer -->
+  <g>
+    <rect x="64" y="728" width="872" height="76" rx="10" fill="#f6f3ec" stroke="#a89c88" stroke-width="1.2" stroke-dasharray="7 5"/>
+    <text x="96" y="758" fill="#201d18" font-size="14" font-weight="700" class="mono">user-config</text>
+    <text x="210" y="758" fill="#71665a" font-size="12.5">trusted user Lua &#8212; a privileged origin, never the third-party plugin API</text>
+    <text x="96" y="782" fill="#71665a" font-size="12.5" class="mono">optional layer: shell &#183; env &#183; initial dimensions</text>
+    <text x="880" y="782" text-anchor="end" fill="#8a8072" font-size="11" class="mono">trusted, not extensible</text>
+  </g>
+
+  <!-- footer -->
+  <line x1="64" y1="832" x2="936" y2="832" stroke="#d9d2c0" stroke-width="1"/>
+  <text x="64" y="856" fill="#201d18" font-size="12.5" font-weight="600">deliberately not reimplemented</text>
+  <text x="64" y="876" fill="#71665a" font-size="12.5">SSH transport &amp; authentication stay owned by the installed OpenSSH client &#183; tmux server behavior stays owned by the installed tmux program</text>
+  <text x="64" y="904" fill="#8a8072" font-size="11.5" class="mono">crates: terminal-core &#183; local-pty &#183; user-config &#183; terminal-cli</text>
+  <text x="936" y="904" text-anchor="end" fill="#8a8072" font-size="11.5" class="mono">cargo build --workspace --locked</text>
 </svg>
