@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod chrome;
 mod mouse;
 
 use std::env;
@@ -8,6 +9,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
+use chrome::{PaletteState, render_palette, render_status_bar, render_tab_bar};
 use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
@@ -28,7 +30,7 @@ use terminal_core::{
     Cell, CellAttributes, CellStyle, Cursor, Endpoint, EndpointEvent, EndpointId, EndpointSize,
     TerminalColor, TerminalState,
 };
-use user_config::TrustedUserConfig;
+use user_config::{PluginAction, PluginManager, TrustedUserConfig};
 
 const SCROLLBACK_LIMIT: usize = 10_000;
 /// Fallback size used when the host terminal cannot report its own
@@ -48,6 +50,33 @@ struct Options {
     ssh_target: Option<String>,
     tmux_session: Option<String>,
     command: Vec<OsString>,
+}
+
+/// A single terminal tab with its own PTY endpoint and terminal state.
+struct Tab {
+    endpoint: Box<dyn Endpoint>,
+    state: TerminalState,
+    render_cache: RenderCache,
+    title: String,
+}
+
+impl Tab {
+    fn new(
+        endpoint: Box<dyn Endpoint>,
+        size: EndpointSize,
+        title: String,
+    ) -> Self {
+        Self {
+            endpoint,
+            state: TerminalState::new(size, SCROLLBACK_LIMIT),
+            render_cache: RenderCache::default(),
+            title,
+        }
+    }
+
+    fn tab_title(&self) -> &str {
+        &self.title
+    }
 }
 
 struct Frontend {
@@ -267,6 +296,7 @@ fn render(
     stdout: &mut impl Write,
     state: &TerminalState,
     cache: &mut RenderCache,
+    row_offset: u16,
 ) -> io::Result<RenderStats> {
     let size = state.size();
     let cell_count = usize::from(size.rows) * usize::from(size.cols);
@@ -310,7 +340,7 @@ fn render(
                 queue!(stdout, Hide)?;
                 output_started = true;
             }
-            queue!(stdout, MoveTo(col, row))?;
+            queue!(stdout, MoveTo(col, row + row_offset))?;
             if last_style != Some(cell.style) {
                 apply_style(stdout, cell.style)?;
                 last_style = Some(cell.style);
@@ -329,7 +359,7 @@ fn render(
 
     if output_started || cursor_changed {
         let col = cursor.col.min(size.cols.saturating_sub(1));
-        let row = cursor.row.min(size.rows.saturating_sub(1));
+        let row = cursor.row.min(size.rows.saturating_sub(1)) + row_offset;
         queue!(stdout, MoveTo(col, row))?;
         if state.cursor_visible() {
             queue!(stdout, Show)?;
@@ -354,9 +384,10 @@ fn finalize_terminal_stream(
     stdout: &mut impl Write,
     state: &mut TerminalState,
     cache: &mut RenderCache,
+    row_offset: u16,
 ) -> io::Result<()> {
     state.finish();
-    render(stdout, state, cache)?;
+    render(stdout, state, cache, row_offset)?;
     Ok(())
 }
 
@@ -503,6 +534,78 @@ fn host_size() -> Result<EndpointSize, Box<dyn std::error::Error>> {
     Ok(EndpointSize::new(default_cols, default_rows).expect("DEFAULT_HOST_SIZE is a valid non-zero size"))
 }
 
+/// Converts a crossterm `KeyEvent` to (mods, key) strings for Lua binding lookup.
+/// Mods are normalized and sorted: "ctrl", "shift", "alt" joined by "+".
+/// Returns None for keys that shouldn't trigger bindings (e.g. releases).
+fn key_to_binding(key: KeyEvent) -> Option<(String, String)> {
+    if key.kind == KeyEventKind::Release {
+        return None;
+    }
+
+    let mut mods = Vec::new();
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        mods.push("ctrl");
+    }
+    if key.modifiers.contains(KeyModifiers::SHIFT) {
+        mods.push("shift");
+    }
+    if key.modifiers.contains(KeyModifiers::ALT) {
+        mods.push("alt");
+    }
+    mods.sort_unstable();
+    let mods_str = mods.join("+");
+
+    let key_str = match key.code {
+        KeyCode::Char(c) => c.to_lowercase().to_string(),
+        KeyCode::Enter => "enter".to_string(),
+        KeyCode::Tab => "tab".to_string(),
+        KeyCode::BackTab => "backtab".to_string(),
+        KeyCode::Backspace => "backspace".to_string(),
+        KeyCode::Esc => "esc".to_string(),
+        KeyCode::Up => "up".to_string(),
+        KeyCode::Down => "down".to_string(),
+        KeyCode::Right => "right".to_string(),
+        KeyCode::Left => "left".to_string(),
+        KeyCode::Home => "home".to_string(),
+        KeyCode::End => "end".to_string(),
+        KeyCode::PageUp => "pageup".to_string(),
+        KeyCode::PageDown => "pagedown".to_string(),
+        KeyCode::Insert => "insert".to_string(),
+        KeyCode::Delete => "delete".to_string(),
+        KeyCode::F(n) => format!("f{n}"),
+        _ => return None,
+    };
+
+    Some((mods_str, key_str))
+}
+
+/// Determines the config directory for plugins.
+/// If --config was given, uses its parent. Otherwise tries ~/.config/extensible-terminal.
+fn config_dir_for(options: &Options) -> PathBuf {
+    if let Some(path) = &options.config_path {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                return parent.to_path_buf();
+            }
+        }
+        return PathBuf::from(".");
+    }
+
+    if let Some(home) = env::var_os("HOME") {
+        let path = PathBuf::from(home).join(".config/extensible-terminal");
+        if path.is_dir() {
+            return path;
+        }
+    }
+
+    PathBuf::from(".")
+}
+
+/// The number of rows reserved for chrome (tab bar + status bar).
+const CHROME_ROWS: u16 = 2;
+/// Row offset where terminal content starts (after tab bar).
+const CONTENT_ROW_OFFSET: u16 = 1;
+
 fn build_endpoint(
     options: Options,
     config: TrustedUserConfig,
@@ -568,6 +671,11 @@ fn build_endpoint(
     )))
 }
 
+/// Main event loop for the tabbed terminal.
+/// This is intentionally a single long function: it's an event loop where
+/// splitting would obscure the control flow. The individual event handlers
+/// (key, resize, endpoint output) are the natural units, not sub-functions.
+#[allow(clippy::too_many_lines)]
 fn run() -> Result<i32, Box<dyn std::error::Error>> {
     let options = match parse_options() {
         Ok(options) => options,
@@ -582,71 +690,363 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
         .map(TrustedUserConfig::from_path)
         .transpose()?
         .unwrap_or_default();
-    let mut endpoint = build_endpoint(options, config)?;
-    endpoint.attach()?;
+
+    // Initialize the Lua plugin system
+    let config_dir = config_dir_for(&options);
+    let mut plugins = PluginManager::new(&config_dir)
+        .map_err(|e| io::Error::other(format!("failed to initialize plugins: {e}")))?;
+    if let Err(e) = plugins.load_all() {
+        eprintln!("plugin load warning: {e}");
+    }
+
+    // We need options for building endpoints but build_endpoint consumes it.
+    // Reconstruct the endpoint-building params.
+    let ssh_target = options.ssh_target.clone();
+    let tmux_session = options.tmux_session.clone();
+    let command: Vec<OsString> = options.command.clone();
+    let config_clone = config.clone();
+
+    let build_tab_endpoint = |title: &str| -> Result<Box<dyn Endpoint>, Box<dyn std::error::Error>> {
+        let opts = Options {
+            config_path: options.config_path.clone(),
+            ssh_target: ssh_target.clone(),
+            tmux_session: tmux_session.clone(),
+            command: command.clone(),
+        };
+        let _ = title;
+        build_endpoint(opts, config_clone.clone())
+    };
 
     let mut frontend = Frontend::enter()?;
-    let size = host_size()?;
-    endpoint.resize(size)?;
-    let mut state = TerminalState::new(size, SCROLLBACK_LIMIT);
+    let host = host_size()?;
+    let content_size = EndpointSize::new(
+        host.cols,
+        host.rows.saturating_sub(CHROME_ROWS).max(1),
+    )?;
+
+    // Create the first tab
+    let mut endpoint = build_tab_endpoint("1")?;
+    endpoint.attach()?;
+    endpoint.resize(content_size)?;
+    let mut tabs = vec![Tab::new(endpoint, content_size, "1".to_string())];
+    let mut active_tab: usize = 0;
+
+    let mut palette = PaletteState::new();
+    let mut status_message: Option<String> = None;
+
     let mut stdout = io::stdout();
-    let mut render_cache = RenderCache::default();
-    render(&mut stdout, &state, &mut render_cache)?;
+    // Initial full render
+    {
+        let theme = plugins.theme();
+        let titles: Vec<String> = tabs.iter().map(|t| t.tab_title().to_string()).collect();
+        render_tab_bar(&mut stdout, &theme, &titles, active_tab, host.cols)?;
+        let tab = &mut tabs[active_tab];
+        render(&mut stdout, &tab.state, &mut tab.render_cache, CONTENT_ROW_OFFSET)?;
+        render_status_bar(
+            &mut stdout,
+            &theme,
+            status_message.as_deref(),
+            tab.tab_title(),
+            host.cols,
+            host.rows,
+        )?;
+        stdout.flush()?;
+    }
+
+    let mut host_cols = host.cols;
+    let mut host_rows = host.rows;
 
     loop {
         let mut did_work = false;
+
+        // Hot reload check (cheap mtime check)
+        match plugins.check_hot_reload() {
+            Ok(true) => {
+                did_work = true;
+                // Force chrome re-render with new theme
+                let theme = plugins.theme();
+                let titles: Vec<String> = tabs.iter().map(|t| t.tab_title().to_string()).collect();
+                render_tab_bar(&mut stdout, &theme, &titles, active_tab, host_cols)?;
+                let tab = &mut tabs[active_tab];
+                tab.render_cache.initialized = false;
+                render(&mut stdout, &tab.state, &mut tab.render_cache, CONTENT_ROW_OFFSET)?;
+                render_status_bar(
+                    &mut stdout,
+                    &theme,
+                    status_message.as_deref(),
+                    tab.tab_title(),
+                    host_cols,
+                    host_rows,
+                )?;
+                render_palette(
+                    &mut stdout,
+                    &theme,
+                    &palette,
+                    &plugins.commands(),
+                    host_cols,
+                    host_rows,
+                )?;
+                stdout.flush()?;
+            }
+            Err(e) => {
+                eprintln!("hot reload warning: {e}");
+            }
+            Ok(false) => {}
+        }
 
         if event::poll(Duration::ZERO)? {
             did_work = true;
             match event::read()? {
                 Event::Key(key) => {
-                    let cursor_mode = state.application_cursor_keys();
-                    let keypad_mode = state.application_keypad_mode();
-                    if let Some(bytes) = key_bytes(key, cursor_mode, keypad_mode) {
-                        endpoint.send(&bytes)?;
+                    // If palette is open, it captures all keys
+                    if palette.open {
+                        match key.code {
+                            KeyCode::Esc => {
+                                palette.close();
+                                let theme = plugins.theme();
+                                let tab = &mut tabs[active_tab];
+                                tab.render_cache.initialized = false;
+                                render(&mut stdout, &tab.state, &mut tab.render_cache, CONTENT_ROW_OFFSET)?;
+                                render_palette(&mut stdout, &theme, &palette, &plugins.commands(), host_cols, host_rows)?;
+                                stdout.flush()?;
+                            }
+                            KeyCode::Enter => {
+                                let commands = plugins.commands();
+                                let filtered = palette.filter(&commands);
+                                if let Some(cmd) = filtered.get(palette.selected) {
+                                    let id = cmd.id.clone();
+                                    palette.close();
+                                    if let Err(e) = plugins.invoke_command(&id) {
+                                        eprintln!("command error: {e}");
+                                    }
+                                }
+                            }
+                            KeyCode::Up => {
+                                if palette.selected > 0 {
+                                    palette.selected -= 1;
+                                }
+                                let theme = plugins.theme();
+                                render_palette(&mut stdout, &theme, &palette, &plugins.commands(), host_cols, host_rows)?;
+                                stdout.flush()?;
+                            }
+                            KeyCode::Down => {
+                                let commands = plugins.commands();
+                                let filtered = palette.filter(&commands);
+                                if palette.selected + 1 < filtered.len() {
+                                    palette.selected += 1;
+                                }
+                                let theme = plugins.theme();
+                                render_palette(&mut stdout, &theme, &palette, &plugins.commands(), host_cols, host_rows)?;
+                                stdout.flush()?;
+                            }
+                            KeyCode::Backspace => {
+                                palette.input.pop();
+                                palette.selected = 0;
+                                let theme = plugins.theme();
+                                render_palette(&mut stdout, &theme, &palette, &plugins.commands(), host_cols, host_rows)?;
+                                stdout.flush()?;
+                            }
+                            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
+                                palette.input.push(c);
+                                palette.selected = 0;
+                                let theme = plugins.theme();
+                                render_palette(&mut stdout, &theme, &palette, &plugins.commands(), host_cols, host_rows)?;
+                                stdout.flush()?;
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+
+                    // Check Lua keybindings first
+                    let mut handled_by_plugin = false;
+                    if let Some((mods, key_str)) = key_to_binding(key) {
+                        if plugins.has_binding(&mods, &key_str) {
+                            match plugins.invoke_binding(&mods, &key_str) {
+                                Ok(true) => handled_by_plugin = true,
+                                Ok(false) => {}
+                                Err(e) => eprintln!("keybinding error: {e}"),
+                            }
+                        }
+                    }
+
+                    if !handled_by_plugin {
+                        let tab = &mut tabs[active_tab];
+                        let cursor_mode = tab.state.application_cursor_keys();
+                        let keypad_mode = tab.state.application_keypad_mode();
+                        if let Some(bytes) = key_bytes(key, cursor_mode, keypad_mode) {
+                            tab.endpoint.send(&bytes)?;
+                        }
                     }
                 }
                 Event::Paste(text) => {
-                    let bytes = paste_bytes(&text, state.bracketed_paste_mode());
-                    endpoint.send(&bytes)?;
+                    let tab = &mut tabs[active_tab];
+                    let bytes = paste_bytes(&text, tab.state.bracketed_paste_mode());
+                    tab.endpoint.send(&bytes)?;
                 }
                 Event::Resize(cols, rows) => {
-                    if let Ok(size) = EndpointSize::new(cols, rows) {
-                        endpoint.resize(size)?;
-                        state.resize(size);
-                        render(&mut stdout, &state, &mut render_cache)?;
+                    if cols != host_cols || rows != host_rows {
+                        host_cols = cols;
+                        host_rows = rows;
+                        if let Ok(content) = EndpointSize::new(
+                            cols,
+                            rows.saturating_sub(CHROME_ROWS).max(1),
+                        ) {
+                            for tab in &mut tabs {
+                                tab.endpoint.resize(content)?;
+                                tab.state.resize(content);
+                                tab.render_cache.initialized = false;
+                            }
+                            let theme = plugins.theme();
+                            let titles: Vec<String> = tabs.iter().map(|t| t.tab_title().to_string()).collect();
+                            render_tab_bar(&mut stdout, &theme, &titles, active_tab, host_cols)?;
+                            let tab = &mut tabs[active_tab];
+                            render(&mut stdout, &tab.state, &mut tab.render_cache, CONTENT_ROW_OFFSET)?;
+                            render_status_bar(
+                                &mut stdout,
+                                &theme,
+                                status_message.as_deref(),
+                                tab.tab_title(),
+                                host_cols,
+                                host_rows,
+                            )?;
+                            stdout.flush()?;
+                        }
                     }
                 }
                 Event::Mouse(mouse_event) => {
+                    let tab = &mut tabs[active_tab];
                     if let Some(bytes) = mouse::mouse_bytes(
                         mouse_event,
-                        state.mouse_tracking_mode(),
-                        state.sgr_mouse_mode(),
+                        tab.state.mouse_tracking_mode(),
+                        tab.state.sgr_mouse_mode(),
                     ) {
-                        endpoint.send(&bytes)?;
+                        tab.endpoint.send(&bytes)?;
                     }
                 }
                 Event::FocusGained | Event::FocusLost => {}
             }
         }
 
-        let endpoint_event = match endpoint.poll_event() {
+        // Drain plugin actions
+        let mut should_quit = false;
+        let mut chrome_dirty = false;
+        for action in plugins.drain_actions() {
+            did_work = true;
+            match action {
+                PluginAction::NewTab => {
+                    match build_tab_endpoint(&format!("{}", tabs.len() + 1)) {
+                        Ok(mut endpoint) => {
+                            let content = EndpointSize::new(
+                                host_cols,
+                                host_rows.saturating_sub(CHROME_ROWS).max(1),
+                            ).unwrap_or(content_size);
+                            if endpoint.attach().is_ok() && endpoint.resize(content).is_ok() {
+                                let title = format!("{}", tabs.len() + 1);
+                                tabs.push(Tab::new(endpoint, content, title));
+                                active_tab = tabs.len() - 1;
+                                chrome_dirty = true;
+                            }
+                        }
+                        Err(e) => eprintln!("new tab failed: {e}"),
+                    }
+                }
+                PluginAction::CloseTab => {
+                    if tabs.len() > 1 {
+                        tabs.remove(active_tab);
+                        if active_tab >= tabs.len() {
+                            active_tab = tabs.len() - 1;
+                        }
+                        chrome_dirty = true;
+                    } else {
+                        should_quit = true;
+                    }
+                }
+                PluginAction::NextTab => {
+                    active_tab = (active_tab + 1) % tabs.len();
+                    chrome_dirty = true;
+                }
+                PluginAction::PrevTab => {
+                    active_tab = active_tab.checked_sub(1).unwrap_or(tabs.len() - 1);
+                    chrome_dirty = true;
+                }
+                PluginAction::RenameTab(name) => {
+                    tabs[active_tab].title = name;
+                    chrome_dirty = true;
+                }
+                PluginAction::SetStatusMessage(msg) => {
+                    status_message = Some(msg);
+                    chrome_dirty = true;
+                }
+                PluginAction::ClearStatusMessage => {
+                    status_message = None;
+                    chrome_dirty = true;
+                }
+                PluginAction::OpenPalette => {
+                    palette.open();
+                    let theme = plugins.theme();
+                    render_palette(
+                        &mut stdout,
+                        &theme,
+                        &palette,
+                        &plugins.commands(),
+                        host_cols,
+                        host_rows,
+                    )?;
+                    stdout.flush()?;
+                }
+                PluginAction::Quit => {
+                    should_quit = true;
+                }
+            }
+        }
+
+        if should_quit {
+            break;
+        }
+
+        if chrome_dirty {
+            let theme = plugins.theme();
+            let titles: Vec<String> = tabs.iter().map(|t| t.tab_title().to_string()).collect();
+            render_tab_bar(&mut stdout, &theme, &titles, active_tab, host_cols)?;
+            let tab = &mut tabs[active_tab];
+            tab.render_cache.initialized = false;
+            render(&mut stdout, &tab.state, &mut tab.render_cache, CONTENT_ROW_OFFSET)?;
+            render_status_bar(
+                &mut stdout,
+                &theme,
+                status_message.as_deref(),
+                tab.tab_title(),
+                host_cols,
+                host_rows,
+            )?;
+            stdout.flush()?;
+        }
+
+        // Poll the active tab's endpoint
+        let poll_result = {
+            let tab = &mut tabs[active_tab];
+            tab.endpoint.poll_event()
+        };
+        let endpoint_event = match poll_result {
             Ok(event) => event,
             Err(error) => {
-                finalize_terminal_stream(&mut stdout, &mut state, &mut render_cache)?;
+                let tab = &mut tabs[active_tab];
+                finalize_terminal_stream(&mut stdout, &mut tab.state, &mut tab.render_cache, CONTENT_ROW_OFFSET)?;
                 return Err(error.into());
             }
         };
         match endpoint_event {
             Some(EndpointEvent::Output(bytes)) => {
                 did_work = true;
+                let tab = &mut tabs[active_tab];
                 let mut responses = Vec::new();
-                state.feed_with_responses(&bytes, |reply| responses.extend_from_slice(reply));
-                frontend.sync_mouse_capture(&mut stdout, state.mouse_reporting_enabled())?;
+                tab.state.feed_with_responses(&bytes, |reply| responses.extend_from_slice(reply));
+                frontend.sync_mouse_capture(&mut stdout, tab.state.mouse_reporting_enabled())?;
                 if !responses.is_empty() {
-                    endpoint.send(&responses)?;
+                    tab.endpoint.send(&responses)?;
                 }
-                render(&mut stdout, &state, &mut render_cache)?;
+                render(&mut stdout, &tab.state, &mut tab.render_cache, CONTENT_ROW_OFFSET)?;
             }
             Some(EndpointEvent::Bell) => {
                 did_work = true;
@@ -655,15 +1055,49 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
             }
             Some(EndpointEvent::TitleChanged(title)) => {
                 did_work = true;
+                // Update tab title from PTY title
+                let short = title
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&title)
+                    .chars()
+                    .take(20)
+                    .collect::<String>();
+                if !short.is_empty() {
+                    tabs[active_tab].title = short;
+                    let theme = plugins.theme();
+                    let titles: Vec<String> = tabs.iter().map(|t| t.tab_title().to_string()).collect();
+                    render_tab_bar(&mut stdout, &theme, &titles, active_tab, host_cols)?;
+                    stdout.flush()?;
+                }
                 queue!(stdout, SetTitle(title))?;
                 stdout.flush()?;
             }
             Some(EndpointEvent::Exited { code, .. }) => {
-                finalize_terminal_stream(&mut stdout, &mut state, &mut render_cache)?;
-                return Ok(code.unwrap_or(1));
+                // If the active tab's process exits, close the tab.
+                // If it was the last tab, exit.
+                if tabs.len() > 1 {
+                    tabs.remove(active_tab);
+                    if active_tab >= tabs.len() {
+                        active_tab = tabs.len() - 1;
+                    }
+                    let theme = plugins.theme();
+                    let titles: Vec<String> = tabs.iter().map(|t| t.tab_title().to_string()).collect();
+                    render_tab_bar(&mut stdout, &theme, &titles, active_tab, host_cols)?;
+                    let tab = &mut tabs[active_tab];
+                    tab.render_cache.initialized = false;
+                    render(&mut stdout, &tab.state, &mut tab.render_cache, CONTENT_ROW_OFFSET)?;
+                    stdout.flush()?;
+                    did_work = true;
+                } else {
+                    let tab = &mut tabs[active_tab];
+                    finalize_terminal_stream(&mut stdout, &mut tab.state, &mut tab.render_cache, CONTENT_ROW_OFFSET)?;
+                    return Ok(code.unwrap_or(1));
+                }
             }
             Some(EndpointEvent::Disconnected { reason }) => {
-                finalize_terminal_stream(&mut stdout, &mut state, &mut render_cache)?;
+                let tab = &mut tabs[active_tab];
+                finalize_terminal_stream(&mut stdout, &mut tab.state, &mut tab.render_cache, CONTENT_ROW_OFFSET)?;
                 return Err(io::Error::new(io::ErrorKind::ConnectionAborted, reason).into());
             }
             None => {}
@@ -673,6 +1107,8 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
             std::thread::sleep(LOOP_IDLE);
         }
     }
+
+    Ok(0)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -681,6 +1117,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[cfg(test)]
+#[allow(clippy::assert_is_empty)]
 mod tests {
     use super::*;
 
@@ -906,19 +1343,19 @@ mod tests {
         let mut cache = RenderCache::default();
 
         let mut full_output = Vec::new();
-        let full = render(&mut full_output, &state, &mut cache).unwrap();
+        let full = render(&mut full_output, &state, &mut cache, 0).unwrap();
         assert!(full.full_redraw);
         assert_eq!(full.cells_emitted, 80 * 24);
 
         state.feed(b"x");
         let mut damage_output = Vec::new();
-        let damage = render(&mut damage_output, &state, &mut cache).unwrap();
+        let damage = render(&mut damage_output, &state, &mut cache, 0).unwrap();
         assert!(!damage.full_redraw);
         assert_eq!(damage.cells_emitted, 1);
         assert!(damage_output.len() * 10 < full_output.len());
 
         let mut unchanged_output = Vec::new();
-        let unchanged = render(&mut unchanged_output, &state, &mut cache).unwrap();
+        let unchanged = render(&mut unchanged_output, &state, &mut cache, 0).unwrap();
         assert_eq!(unchanged.cells_emitted, 0);
         assert!(unchanged_output.is_empty());
     }
@@ -928,11 +1365,11 @@ mod tests {
         let size = EndpointSize::new(8, 4).unwrap();
         let mut state = TerminalState::new(size, 0);
         let mut cache = RenderCache::default();
-        render(&mut Vec::new(), &state, &mut cache).unwrap();
+        render(&mut Vec::new(), &state, &mut cache, 0).unwrap();
 
         state.feed(b"\x1b[3;4H");
         let mut output = Vec::new();
-        let render_result = render(&mut output, &state, &mut cache).unwrap();
+        let render_result = render(&mut output, &state, &mut cache, 0).unwrap();
         assert_eq!(render_result.cells_emitted, 0);
         assert!(!output.is_empty());
     }
@@ -942,11 +1379,11 @@ mod tests {
         let size = EndpointSize::new(4, 1).unwrap();
         let mut state = TerminalState::new(size, 0);
         let mut cache = RenderCache::default();
-        render(&mut Vec::new(), &state, &mut cache).unwrap();
+        render(&mut Vec::new(), &state, &mut cache, 0).unwrap();
 
         state.feed("界".as_bytes());
         let mut wide_output = Vec::new();
-        let wide = render(&mut wide_output, &state, &mut cache).unwrap();
+        let wide = render(&mut wide_output, &state, &mut cache, 0).unwrap();
         assert_eq!(wide.cells_emitted, 1);
         assert!(
             wide_output
@@ -956,7 +1393,7 @@ mod tests {
 
         state.feed(b"\rA");
         let mut narrow_output = Vec::new();
-        let narrow = render(&mut narrow_output, &state, &mut cache).unwrap();
+        let narrow = render(&mut narrow_output, &state, &mut cache, 0).unwrap();
         assert_eq!(narrow.cells_emitted, 2);
         assert!(narrow_output.contains(&b'A'));
     }
@@ -965,10 +1402,10 @@ mod tests {
     fn damage_renderer_forces_full_redraw_on_resize() {
         let mut state = TerminalState::new(EndpointSize::new(4, 2).unwrap(), 0);
         let mut cache = RenderCache::default();
-        render(&mut Vec::new(), &state, &mut cache).unwrap();
+        render(&mut Vec::new(), &state, &mut cache, 0).unwrap();
 
         state.resize(EndpointSize::new(6, 3).unwrap());
-        let render_result = render(&mut Vec::new(), &state, &mut cache).unwrap();
+        let render_result = render(&mut Vec::new(), &state, &mut cache, 0).unwrap();
         assert!(render_result.full_redraw);
         assert_eq!(render_result.cells_emitted, 18);
     }
@@ -978,15 +1415,15 @@ mod tests {
         let size = EndpointSize::new(6, 2).unwrap();
         let mut state = TerminalState::new(size, 0);
         let mut cache = RenderCache::default();
-        render(&mut Vec::new(), &state, &mut cache).unwrap();
+        render(&mut Vec::new(), &state, &mut cache, 0).unwrap();
 
         state.feed(b"\x1b[41mAB\x1b[2K");
-        let bce = render(&mut Vec::new(), &state, &mut cache).unwrap();
+        let bce = render(&mut Vec::new(), &state, &mut cache, 0).unwrap();
         assert!(!bce.full_redraw);
         assert!(bce.cells_emitted >= usize::from(size.cols));
 
         state.feed(b"\x1b[?1049h");
-        let alternate = render(&mut Vec::new(), &state, &mut cache).unwrap();
+        let alternate = render(&mut Vec::new(), &state, &mut cache, 0).unwrap();
         assert!(!alternate.full_redraw);
         assert!(alternate.cells_emitted >= usize::from(size.cols));
     }
@@ -996,11 +1433,11 @@ mod tests {
         let size = EndpointSize::new(4, 2).unwrap();
         let mut state = TerminalState::new(size, 0);
         let mut cache = RenderCache::default();
-        render(&mut Vec::new(), &state, &mut cache).unwrap();
+        render(&mut Vec::new(), &state, &mut cache, 0).unwrap();
         state.feed(b"A\xe2\x98");
 
         let mut output = Vec::new();
-        finalize_terminal_stream(&mut output, &mut state, &mut cache).unwrap();
+        finalize_terminal_stream(&mut output, &mut state, &mut cache, 0).unwrap();
         assert_eq!(state.cell(0, 0).unwrap().character, 'A');
         assert_eq!(state.cell(0, 1).unwrap().character, '\u{fffd}');
         assert!(!output.is_empty());
