@@ -7,6 +7,10 @@ use std::path::Path;
 use mlua::{Lua, Table, Value};
 use terminal_core::EndpointSize;
 
+pub mod plugin;
+
+pub use plugin::{KeyBinding, PaletteCommand, PluginAction, PluginError, PluginManager, Theme};
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TrustedUserConfig {
     pub shell: Option<String>,
@@ -76,6 +80,34 @@ impl TrustedUserConfig {
     /// when it does not return a table, or [`ConfigError::InvalidSize`] for invalid dimensions.
     pub fn from_source(source: &str) -> Result<Self, ConfigError> {
         let lua = Lua::new();
+        // Provide a stub `terminal` table so plugin-style init.lua files
+        // (which call terminal.set_theme, terminal.bind, etc.) don't error
+        // when loaded as trusted config. The stub methods are no-ops here;
+        // real plugin loading happens via PluginManager which provides the
+        // full API.
+        let stub = lua.create_table().map_err(ConfigError::Lua)?;
+        let noop = lua
+            .create_function(|_, _: mlua::MultiValue| Ok(()))
+            .map_err(ConfigError::Lua)?;
+        for name in [
+            "bind",
+            "command",
+            "set_theme",
+            "new_tab",
+            "close_tab",
+            "next_tab",
+            "prev_tab",
+            "rename_tab",
+            "quit",
+            "set_status",
+            "clear_status",
+            "palette",
+            "log",
+        ] {
+            stub.set(name, noop.clone()).map_err(ConfigError::Lua)?;
+        }
+        lua.globals().set("terminal", stub).map_err(ConfigError::Lua)?;
+
         let value: Value = lua.load(source).set_name("trusted-user-config").eval()?;
         let Value::Table(table) = value else {
             return Err(ConfigError::InvalidRoot);
