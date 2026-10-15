@@ -158,3 +158,75 @@ Lua configuration is trusted user code and may use Lua standard libraries. Never
 ---
 
 *Built by [Hans Sai](https://builtbysai.com).*
+
+## Lua Plugin System
+
+Like lite, all behavior beyond the VT core is defined in Lua. Edit any `.lua`
+file and changes take effect immediately via hot reload. No rebuild needed.
+
+### Config Layout
+
+```
+~/.config/extensible-terminal/
+  init.lua           -- Main config: theme, keybindings, commands
+  plugins/
+    my-plugin.lua    -- Additional plugins (loaded alphabetically)
+```
+
+Or pass `--config /path/to/init.lua` and plugins load from `/path/to/plugins/`.
+
+### Lua API
+
+```lua
+-- Theme (all colors as hex strings)
+terminal.set_theme({
+    background = "#1a1a1e",
+    foreground = "#d8d8d8",
+    tab_active_bg = "#2d2d32",
+    tab_active_fg = "#ffffff",
+    -- ... see Theme struct for all fields
+})
+
+-- Keybindings
+terminal.bind("ctrl+t", function() terminal.new_tab() end)
+terminal.bind("ctrl+shift+p", function() terminal.palette() end)
+
+-- Commands (appear in palette)
+terminal.command("my:action", "My Action", function()
+    terminal.set_status("did something!")
+end)
+
+-- Tabs
+terminal.new_tab()      -- Open new tab
+terminal.close_tab()    -- Close current tab
+terminal.next_tab()     -- Switch to next tab
+terminal.prev_tab()     -- Switch to previous tab
+terminal.rename_tab("name")
+
+-- Palette
+terminal.palette()      -- Open command palette
+
+-- Status bar
+terminal.set_status("message")
+terminal.clear_status()
+
+-- Utilities
+terminal.log("debug message")  -- Logs to stderr
+terminal.quit()                -- Quit the terminal
+```
+
+### Default Keybindings
+
+| Key | Action |
+|-----|--------|
+| `ctrl+t` | New tab |
+| `ctrl+w` | Close tab |
+| `ctrl+tab` | Next tab |
+| `ctrl+shift+tab` | Previous tab |
+| `ctrl+shift+p` | Command palette |
+| `ctrl+q` | Quit |
+
+### Example Plugins
+
+See `examples/plugins/` for working examples:
+- `theme-switcher.lua`: Adds theme commands and `ctrl+shift+t` to cycle themes
