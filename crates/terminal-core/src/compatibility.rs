@@ -126,6 +126,7 @@ pub fn is_recognized_term(term: &str) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::assert_is_empty)]
 mod tests {
     use super::*;
 
