@@ -286,6 +286,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assert_is_empty)]
     fn concrete_tmux_provider_has_no_error_level_self_diagnostic() {
         let endpoint = TmuxPtyEndpoint::new(
             EndpointId::new("tmux:work").unwrap(),
@@ -300,7 +301,7 @@ mod tests {
             endpoint.capabilities(),
             &environment,
         );
-        assert!(diagnostics.is_empty());
+        assert!(diagnostics.is_empty(), "expected no diagnostics");
     }
 
     #[test]
