@@ -2,6 +2,7 @@
 
 mod chrome;
 mod mouse;
+mod panes;
 
 use std::env;
 use std::ffi::OsString;
@@ -9,7 +10,10 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use chrome::{PaletteState, render_palette, render_status_bar, render_tab_bar};
+use chrome::{
+    render_palette, render_pane_dividers, render_status_bar, render_tab_bar, ChromeDivider,
+    PaletteState,
+};
 use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
@@ -26,8 +30,11 @@ use crossterm::{execute, queue};
 use local_pty::{
     LocalProcessSpec, LocalPtyEndpoint, SshPtyEndpoint, SshPtySpec, TmuxPtyEndpoint, TmuxPtySpec,
 };
+use panes::{
+    CloseResult, Pane, PaneTree, Rect, RenderCache, RenderStats, SplitDirection,
+};
 use terminal_core::{
-    Cell, CellAttributes, CellStyle, Cursor, Endpoint, EndpointEvent, EndpointId, EndpointSize,
+    Cell, CellAttributes, CellStyle, Endpoint, EndpointEvent, EndpointId, EndpointSize,
     TerminalColor, TerminalState,
 };
 use user_config::{PluginAction, PluginManager, TrustedUserConfig};
@@ -52,24 +59,17 @@ struct Options {
     command: Vec<OsString>,
 }
 
-/// A single terminal tab with its own PTY endpoint and terminal state.
+/// A single terminal tab holding a split-pane tree.
+/// Each leaf pane owns a full PTY endpoint and terminal state.
 struct Tab {
-    endpoint: Box<dyn Endpoint>,
-    state: TerminalState,
-    render_cache: RenderCache,
+    panes: PaneTree,
     title: String,
 }
 
 impl Tab {
-    fn new(
-        endpoint: Box<dyn Endpoint>,
-        size: EndpointSize,
-        title: String,
-    ) -> Self {
+    fn new(endpoint: Box<dyn Endpoint>, size: EndpointSize, title: String) -> Self {
         Self {
-            endpoint,
-            state: TerminalState::new(size, SCROLLBACK_LIMIT),
-            render_cache: RenderCache::default(),
+            panes: PaneTree::new(endpoint, size, title.clone()),
             title,
         }
     }
@@ -277,25 +277,11 @@ fn apply_style(stdout: &mut impl Write, style: CellStyle) -> io::Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Default)]
-struct RenderCache {
-    size: Option<EndpointSize>,
-    cells: Vec<Cell>,
-    cursor: Cursor,
-    cursor_visible: bool,
-    initialized: bool,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct RenderStats {
-    full_redraw: bool,
-    cells_emitted: usize,
-}
-
 fn render(
     stdout: &mut impl Write,
     state: &TerminalState,
     cache: &mut RenderCache,
+    col_offset: u16,
     row_offset: u16,
 ) -> io::Result<RenderStats> {
     let size = state.size();
@@ -317,7 +303,16 @@ fn render(
     let mut last_style = None;
 
     if full_redraw {
-        queue!(stdout, Hide, Clear(ClearType::All))?;
+        // Clear only this pane's rectangle. The tab bar (row 0) and status
+        // bar (last row) are chrome drawn separately and must survive; with
+        // splits, neighboring panes and dividers must survive too. A bare
+        // Clear(CurrentLine) would wipe the whole host line, so paint spaces
+        // over exactly the pane's columns instead.
+        let blank: String = " ".repeat(usize::from(size.cols));
+        queue!(stdout, Hide)?;
+        for row in 0..size.rows {
+            queue!(stdout, MoveTo(col_offset, row + row_offset), Print(&blank))?;
+        }
         output_started = true;
     }
 
@@ -340,7 +335,7 @@ fn render(
                 queue!(stdout, Hide)?;
                 output_started = true;
             }
-            queue!(stdout, MoveTo(col, row + row_offset))?;
+            queue!(stdout, MoveTo(col + col_offset, row + row_offset))?;
             if last_style != Some(cell.style) {
                 apply_style(stdout, cell.style)?;
                 last_style = Some(cell.style);
@@ -358,7 +353,7 @@ fn render(
     }
 
     if output_started || cursor_changed {
-        let col = cursor.col.min(size.cols.saturating_sub(1));
+        let col = cursor.col.min(size.cols.saturating_sub(1)) + col_offset;
         let row = cursor.row.min(size.rows.saturating_sub(1)) + row_offset;
         queue!(stdout, MoveTo(col, row))?;
         if state.cursor_visible() {
@@ -384,10 +379,106 @@ fn finalize_terminal_stream(
     stdout: &mut impl Write,
     state: &mut TerminalState,
     cache: &mut RenderCache,
+    col_offset: u16,
     row_offset: u16,
 ) -> io::Result<()> {
     state.finish();
-    render(stdout, state, cache, row_offset)?;
+    render(stdout, state, cache, col_offset, row_offset)?;
+    Ok(())
+}
+
+/// The content rectangle (in host cells) available to panes:
+/// everything between the tab bar (row 0) and the status bar (last row).
+fn content_rect(host_cols: u16, host_rows: u16) -> Rect {
+    Rect {
+        col: 0,
+        row: 0,
+        cols: host_cols,
+        rows: host_rows.saturating_sub(CHROME_ROWS).max(1),
+    }
+}
+
+/// Resize every pane in `tab` to its computed layout rectangle.
+/// Panes whose size did not change are left alone.
+fn relayout_tab(tab: &mut Tab, host_cols: u16, host_rows: u16) {
+    let area = content_rect(host_cols, host_rows);
+    let (layouts, _) = tab.panes.compute(area);
+    for layout in layouts {
+        if let Some(pane) = tab.panes.pane_mut(layout.id) {
+            let current = pane.size();
+            if current.cols != layout.rect.cols || current.rows != layout.rect.rows {
+                if let Ok(size) = EndpointSize::new(layout.rect.cols, layout.rect.rows) {
+                    // A failed PTY resize leaves the pane at its old size;
+                    // the next frame's damage pass still renders it correctly.
+                    let _ = pane.endpoint.resize(size);
+                    pane.state.resize(size);
+                    pane.render_cache.initialized = false;
+                }
+            }
+        }
+    }
+}
+
+/// Render every pane of the active tab with damage tracking, then the
+/// dividers, then park the host cursor on the focused pane's cursor.
+/// Only the focused pane shows a cursor: it is the focus indicator.
+fn render_active_tab_content(
+    stdout: &mut impl Write,
+    theme: &user_config::Theme,
+    tab: &mut Tab,
+    host_cols: u16,
+    host_rows: u16,
+) -> io::Result<()> {
+    let area = content_rect(host_cols, host_rows);
+    let (layouts, dividers) = tab.panes.compute(area);
+    let focused_id = tab.panes.focused_id();
+
+    for layout in &layouts {
+        if let Some(pane) = tab.panes.pane_mut(layout.id) {
+            render(
+                stdout,
+                &pane.state,
+                &mut pane.render_cache,
+                layout.rect.col + area.col,
+                CONTENT_ROW_OFFSET + layout.rect.row + area.row,
+            )?;
+        }
+    }
+
+    let chrome_dividers: Vec<ChromeDivider> = dividers
+        .iter()
+        .map(|divider| ChromeDivider {
+            col: divider.col + area.col,
+            row: divider.row + area.row,
+            cols: divider.cols,
+            rows: divider.rows,
+            vertical: divider.vertical,
+        })
+        .collect();
+    render_pane_dividers(stdout, theme, &chrome_dividers, CONTENT_ROW_OFFSET)?;
+
+    // The host cursor belongs to the focused pane; anything a background
+    // pane's damage pass left behind is superseded here.
+    if let Some(focused) = layouts.iter().find(|layout| layout.id == focused_id) {
+        if let Some(pane) = tab.panes.pane_mut(focused_id) {
+            let cursor = pane.state.cursor();
+            let size = pane.size();
+            let col = cursor.col.min(size.cols.saturating_sub(1))
+                + focused.rect.col
+                + area.col;
+            let row = cursor.row.min(size.rows.saturating_sub(1))
+                + CONTENT_ROW_OFFSET
+                + focused.rect.row
+                + area.row;
+            queue!(stdout, MoveTo(col, row))?;
+            if pane.state.cursor_visible() {
+                queue!(stdout, Show)?;
+            } else {
+                queue!(stdout, Hide)?;
+            }
+        }
+    }
+    stdout.flush()?;
     Ok(())
 }
 
@@ -671,6 +762,14 @@ fn build_endpoint(
     )))
 }
 
+/// Lifecycle outcome for one pane's endpoint observed during a poll frame.
+/// Structural changes are applied after polling all panes, since closing a
+/// pane mutates the tree being iterated.
+enum PaneOutcome {
+    Exited(u64, Option<i32>),
+    Failed(u64, String),
+}
+
 /// Main event loop for the tabbed terminal.
 /// This is intentionally a single long function: it's an event loop where
 /// splitting would obscure the control flow. The individual event handlers
@@ -735,13 +834,13 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
     let mut status_message: Option<String> = None;
 
     let mut stdout = io::stdout();
-    // Initial full render
+    // Initial full render. Chrome (tab bar, status bar) renders before the
+    // pane content so the host cursor ends parked on the focused pane.
     {
         let theme = plugins.theme();
         let titles: Vec<String> = tabs.iter().map(|t| t.tab_title().to_string()).collect();
         render_tab_bar(&mut stdout, &theme, &titles, active_tab, host.cols)?;
         let tab = &mut tabs[active_tab];
-        render(&mut stdout, &tab.state, &mut tab.render_cache, CONTENT_ROW_OFFSET)?;
         render_status_bar(
             &mut stdout,
             &theme,
@@ -750,6 +849,7 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
             host.cols,
             host.rows,
         )?;
+        render_active_tab_content(&mut stdout, &theme, tab, host.cols, host.rows)?;
         stdout.flush()?;
     }
 
@@ -768,8 +868,7 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
                 let titles: Vec<String> = tabs.iter().map(|t| t.tab_title().to_string()).collect();
                 render_tab_bar(&mut stdout, &theme, &titles, active_tab, host_cols)?;
                 let tab = &mut tabs[active_tab];
-                tab.render_cache.initialized = false;
-                render(&mut stdout, &tab.state, &mut tab.render_cache, CONTENT_ROW_OFFSET)?;
+                tab.panes.invalidate_caches();
                 render_status_bar(
                     &mut stdout,
                     &theme,
@@ -778,6 +877,7 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
                     host_cols,
                     host_rows,
                 )?;
+                render_active_tab_content(&mut stdout, &theme, tab, host_cols, host_rows)?;
                 render_palette(
                     &mut stdout,
                     &theme,
@@ -805,8 +905,8 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
                                 palette.close();
                                 let theme = plugins.theme();
                                 let tab = &mut tabs[active_tab];
-                                tab.render_cache.initialized = false;
-                                render(&mut stdout, &tab.state, &mut tab.render_cache, CONTENT_ROW_OFFSET)?;
+                                tab.panes.invalidate_caches();
+                                render_active_tab_content(&mut stdout, &theme, tab, host_cols, host_rows)?;
                                 render_palette(&mut stdout, &theme, &palette, &plugins.commands(), host_cols, host_rows)?;
                                 stdout.flush()?;
                             }
@@ -872,36 +972,32 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
 
                     if !handled_by_plugin {
                         let tab = &mut tabs[active_tab];
-                        let cursor_mode = tab.state.application_cursor_keys();
-                        let keypad_mode = tab.state.application_keypad_mode();
+                        let pane = tab.panes.focused_mut();
+                        let cursor_mode = pane.state.application_cursor_keys();
+                        let keypad_mode = pane.state.application_keypad_mode();
                         if let Some(bytes) = key_bytes(key, cursor_mode, keypad_mode) {
-                            tab.endpoint.send(&bytes)?;
+                            pane.endpoint.send(&bytes)?;
                         }
                     }
                 }
                 Event::Paste(text) => {
                     let tab = &mut tabs[active_tab];
-                    let bytes = paste_bytes(&text, tab.state.bracketed_paste_mode());
-                    tab.endpoint.send(&bytes)?;
+                    let pane = tab.panes.focused_mut();
+                    let bytes = paste_bytes(&text, pane.state.bracketed_paste_mode());
+                    pane.endpoint.send(&bytes)?;
                 }
                 Event::Resize(cols, rows) => {
                     if cols != host_cols || rows != host_rows {
                         host_cols = cols;
                         host_rows = rows;
-                        if let Ok(content) = EndpointSize::new(
-                            cols,
-                            rows.saturating_sub(CHROME_ROWS).max(1),
-                        ) {
+                        if cols > 0 && rows > CHROME_ROWS {
                             for tab in &mut tabs {
-                                tab.endpoint.resize(content)?;
-                                tab.state.resize(content);
-                                tab.render_cache.initialized = false;
+                                relayout_tab(tab, host_cols, host_rows);
                             }
                             let theme = plugins.theme();
                             let titles: Vec<String> = tabs.iter().map(|t| t.tab_title().to_string()).collect();
                             render_tab_bar(&mut stdout, &theme, &titles, active_tab, host_cols)?;
                             let tab = &mut tabs[active_tab];
-                            render(&mut stdout, &tab.state, &mut tab.render_cache, CONTENT_ROW_OFFSET)?;
                             render_status_bar(
                                 &mut stdout,
                                 &theme,
@@ -910,18 +1006,41 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
                                 host_cols,
                                 host_rows,
                             )?;
+                            render_active_tab_content(&mut stdout, &theme, tab, host_cols, host_rows)?;
                             stdout.flush()?;
                         }
                     }
                 }
                 Event::Mouse(mouse_event) => {
+                    // Translate host coordinates into the focused pane's
+                    // local coordinates and drop events outside it.
                     let tab = &mut tabs[active_tab];
-                    if let Some(bytes) = mouse::mouse_bytes(
-                        mouse_event,
-                        tab.state.mouse_tracking_mode(),
-                        tab.state.sgr_mouse_mode(),
-                    ) {
-                        tab.endpoint.send(&bytes)?;
+                    let area = content_rect(host_cols, host_rows);
+                    if let Some(rect) = tab.panes.focused_rect(area) {
+                        let pane_col = mouse_event.column.saturating_sub(rect.col + area.col);
+                        let pane_row = mouse_event
+                            .row
+                            .saturating_sub(CONTENT_ROW_OFFSET + rect.row + area.row);
+                        let inside = mouse_event.column >= rect.col + area.col
+                            && mouse_event.column < rect.col + area.col + rect.cols
+                            && mouse_event.row >= CONTENT_ROW_OFFSET + rect.row + area.row
+                            && mouse_event.row
+                                < CONTENT_ROW_OFFSET + rect.row + area.row + rect.rows;
+                        if inside {
+                            let pane = tab.panes.focused_mut();
+                            let translated = crossterm::event::MouseEvent {
+                                column: pane_col,
+                                row: pane_row,
+                                ..mouse_event
+                            };
+                            if let Some(bytes) = mouse::mouse_bytes(
+                                translated,
+                                pane.state.mouse_tracking_mode(),
+                                pane.state.sgr_mouse_mode(),
+                            ) {
+                                pane.endpoint.send(&bytes)?;
+                            }
+                        }
                     }
                 }
                 Event::FocusGained | Event::FocusLost => {}
@@ -995,6 +1114,84 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
                     )?;
                     stdout.flush()?;
                 }
+                PluginAction::SplitHorizontal | PluginAction::SplitVertical => {
+                    let direction = if action == PluginAction::SplitHorizontal {
+                        SplitDirection::Horizontal
+                    } else {
+                        SplitDirection::Vertical
+                    };
+                    let area = content_rect(host_cols, host_rows);
+                    let planned = tabs[active_tab].panes.planned_split(area, direction);
+                    match planned {
+                        None => {
+                            status_message =
+                                Some("pane too small to split".to_string());
+                            chrome_dirty = true;
+                        }
+                        Some((_, new_size)) => {
+                            match build_tab_endpoint("pane") {
+                                Ok(mut endpoint) => {
+                                    if endpoint.attach().is_ok()
+                                        && endpoint.resize(new_size).is_ok()
+                                    {
+                                        let tab = &mut tabs[active_tab];
+                                        let id = tab.panes.reserve_id();
+                                        let pane = Pane::new(
+                                            id,
+                                            endpoint,
+                                            new_size,
+                                            SCROLLBACK_LIMIT,
+                                            "pane".to_string(),
+                                        );
+                                        tab.panes.split_focused(direction, pane);
+                                        // The kept pane shrank; relayout
+                                        // resizes it (and only it) to fit.
+                                        relayout_tab(tab, host_cols, host_rows);
+                                        chrome_dirty = true;
+                                    } else {
+                                        status_message =
+                                            Some("split failed to start shell".to_string());
+                                        chrome_dirty = true;
+                                    }
+                                }
+                                Err(error) => {
+                                    status_message =
+                                        Some(format!("split failed: {error}"));
+                                    chrome_dirty = true;
+                                }
+                            }
+                        }
+                    }
+                }
+                PluginAction::ClosePane => {
+                    let tab = &mut tabs[active_tab];
+                    match tab.panes.close_focused() {
+                        CloseResult::ClosedPane => {
+                            relayout_tab(tab, host_cols, host_rows);
+                            chrome_dirty = true;
+                        }
+                        CloseResult::LastPane => {
+                            // Closing the last pane closes the tab.
+                            if tabs.len() > 1 {
+                                tabs.remove(active_tab);
+                                if active_tab >= tabs.len() {
+                                    active_tab = tabs.len() - 1;
+                                }
+                                chrome_dirty = true;
+                            } else {
+                                should_quit = true;
+                            }
+                        }
+                    }
+                }
+                PluginAction::NextPane => {
+                    tabs[active_tab].panes.focus_next();
+                    chrome_dirty = true;
+                }
+                PluginAction::PrevPane => {
+                    tabs[active_tab].panes.focus_prev();
+                    chrome_dirty = true;
+                }
                 PluginAction::Quit => {
                     should_quit = true;
                 }
@@ -1005,13 +1202,157 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
             break;
         }
 
+        // Poll every pane endpoint in the active tab. Structural changes
+        // (a pane's process exiting or its transport failing) are collected
+        // and applied after polling, since they mutate the pane tree.
+        let mut outcomes: Vec<PaneOutcome> = Vec::new();
+        let mut bell = false;
+        let mut pane_output = false;
+        let mut focused_title: Option<String> = None;
+        {
+            let tab = &mut tabs[active_tab];
+            let area = content_rect(host_cols, host_rows);
+            let (layouts, _) = tab.panes.compute(area);
+            let focused_id = tab.panes.focused_id();
+            for layout in layouts {
+                let Some(pane) = tab.panes.pane_mut(layout.id) else {
+                    continue;
+                };
+                match pane.endpoint.poll_event() {
+                    Ok(None) => {}
+                    Ok(Some(EndpointEvent::Output(bytes))) => {
+                        did_work = true;
+                        pane_output = true;
+                        let mut responses = Vec::new();
+                        pane.state.feed_with_responses(&bytes, |reply| {
+                            responses.extend_from_slice(reply);
+                        });
+                        if !responses.is_empty() {
+                            // A failed write means the transport is going
+                            // away; the next poll reaps the pane.
+                            let _ = pane.endpoint.send(&responses);
+                        }
+                    }
+                    Ok(Some(EndpointEvent::Bell)) => {
+                        did_work = true;
+                        bell = true;
+                    }
+                    Ok(Some(EndpointEvent::TitleChanged(title))) => {
+                        did_work = true;
+                        let short = title
+                            .rsplit('/')
+                            .next()
+                            .unwrap_or(&title)
+                            .chars()
+                            .take(20)
+                            .collect::<String>();
+                        if !short.is_empty() {
+                            pane.title.clone_from(&short);
+                            if layout.id == focused_id {
+                                focused_title = Some(short);
+                            }
+                        }
+                        queue!(stdout, SetTitle(title))?;
+                    }
+                    Ok(Some(EndpointEvent::Exited { code, .. })) => {
+                        did_work = true;
+                        outcomes.push(PaneOutcome::Exited(layout.id, code));
+                    }
+                    Ok(Some(EndpointEvent::Disconnected { reason })) => {
+                        did_work = true;
+                        outcomes.push(PaneOutcome::Failed(layout.id, reason));
+                    }
+                    Err(error) => {
+                        did_work = true;
+                        outcomes.push(PaneOutcome::Failed(layout.id, error.to_string()));
+                    }
+                }
+            }
+            if pane_output {
+                let pane = tab.panes.focused_mut();
+                frontend.sync_mouse_capture(&mut stdout, pane.state.mouse_reporting_enabled())?;
+            }
+        }
+
+        if bell {
+            stdout.write_all(b"\x07")?;
+        }
+        if let Some(short) = focused_title.as_ref() {
+            // The focused pane's PTY title drives the tab title, as before.
+            tabs[active_tab].title.clone_from(short);
+            let theme = plugins.theme();
+            let titles: Vec<String> = tabs.iter().map(|t| t.tab_title().to_string()).collect();
+            render_tab_bar(&mut stdout, &theme, &titles, active_tab, host_cols)?;
+        }
+        if pane_output || bell || focused_title.is_some() {
+            stdout.flush()?;
+        }
+        if pane_output {
+            let theme = plugins.theme();
+            let tab = &mut tabs[active_tab];
+            render_active_tab_content(&mut stdout, &theme, tab, host_cols, host_rows)?;
+        }
+
+        // Apply pane lifecycle outcomes.
+        for outcome in outcomes {
+            let (pane_id, exit_code, failure) = match outcome {
+                PaneOutcome::Exited(id, code) => (id, code, None),
+                PaneOutcome::Failed(id, reason) => (id, None, Some(reason)),
+            };
+            let tab = &mut tabs[active_tab];
+            match tab.panes.close_pane(pane_id) {
+                CloseResult::ClosedPane => {
+                    relayout_tab(tab, host_cols, host_rows);
+                    if let Some(reason) = failure {
+                        status_message = Some(format!("pane lost: {reason}"));
+                    }
+                    chrome_dirty = true;
+                }
+                CloseResult::LastPane => {
+                    if tabs.len() > 1 {
+                        tabs.remove(active_tab);
+                        if active_tab >= tabs.len() {
+                            active_tab = tabs.len() - 1;
+                        }
+                        if let Some(reason) = failure {
+                            status_message = Some(format!("pane lost: {reason}"));
+                        }
+                        chrome_dirty = true;
+                    } else {
+                        let tab = &mut tabs[active_tab];
+                        let area = content_rect(host_cols, host_rows);
+                        let (layouts, _) = tab.panes.compute(area);
+                        let first = layouts.first().expect("last pane exists");
+                        if let Some(pane) = tab.panes.pane_mut(first.id) {
+                            finalize_terminal_stream(
+                                &mut stdout,
+                                &mut pane.state,
+                                &mut pane.render_cache,
+                                first.rect.col + area.col,
+                                CONTENT_ROW_OFFSET + first.rect.row + area.row,
+                            )?;
+                        }
+                        if let Some(reason) = failure {
+                            return Err(io::Error::new(
+                                io::ErrorKind::ConnectionAborted,
+                                reason,
+                            )
+                            .into());
+                        }
+                        return Ok(exit_code.unwrap_or(1));
+                    }
+                }
+            }
+        }
+
         if chrome_dirty {
             let theme = plugins.theme();
             let titles: Vec<String> = tabs.iter().map(|t| t.tab_title().to_string()).collect();
             render_tab_bar(&mut stdout, &theme, &titles, active_tab, host_cols)?;
             let tab = &mut tabs[active_tab];
-            tab.render_cache.initialized = false;
-            render(&mut stdout, &tab.state, &mut tab.render_cache, CONTENT_ROW_OFFSET)?;
+            tab.panes.invalidate_caches();
+            // Status bar before content: the host cursor must end parked on
+            // the focused pane, not on the chrome.
             render_status_bar(
                 &mut stdout,
                 &theme,
@@ -1020,87 +1361,8 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
                 host_cols,
                 host_rows,
             )?;
+            render_active_tab_content(&mut stdout, &theme, tab, host_cols, host_rows)?;
             stdout.flush()?;
-        }
-
-        // Poll the active tab's endpoint
-        let poll_result = {
-            let tab = &mut tabs[active_tab];
-            tab.endpoint.poll_event()
-        };
-        let endpoint_event = match poll_result {
-            Ok(event) => event,
-            Err(error) => {
-                let tab = &mut tabs[active_tab];
-                finalize_terminal_stream(&mut stdout, &mut tab.state, &mut tab.render_cache, CONTENT_ROW_OFFSET)?;
-                return Err(error.into());
-            }
-        };
-        match endpoint_event {
-            Some(EndpointEvent::Output(bytes)) => {
-                did_work = true;
-                let tab = &mut tabs[active_tab];
-                let mut responses = Vec::new();
-                tab.state.feed_with_responses(&bytes, |reply| responses.extend_from_slice(reply));
-                frontend.sync_mouse_capture(&mut stdout, tab.state.mouse_reporting_enabled())?;
-                if !responses.is_empty() {
-                    tab.endpoint.send(&responses)?;
-                }
-                render(&mut stdout, &tab.state, &mut tab.render_cache, CONTENT_ROW_OFFSET)?;
-            }
-            Some(EndpointEvent::Bell) => {
-                did_work = true;
-                stdout.write_all(b"\x07")?;
-                stdout.flush()?;
-            }
-            Some(EndpointEvent::TitleChanged(title)) => {
-                did_work = true;
-                // Update tab title from PTY title
-                let short = title
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(&title)
-                    .chars()
-                    .take(20)
-                    .collect::<String>();
-                if !short.is_empty() {
-                    tabs[active_tab].title = short;
-                    let theme = plugins.theme();
-                    let titles: Vec<String> = tabs.iter().map(|t| t.tab_title().to_string()).collect();
-                    render_tab_bar(&mut stdout, &theme, &titles, active_tab, host_cols)?;
-                    stdout.flush()?;
-                }
-                queue!(stdout, SetTitle(title))?;
-                stdout.flush()?;
-            }
-            Some(EndpointEvent::Exited { code, .. }) => {
-                // If the active tab's process exits, close the tab.
-                // If it was the last tab, exit.
-                if tabs.len() > 1 {
-                    tabs.remove(active_tab);
-                    if active_tab >= tabs.len() {
-                        active_tab = tabs.len() - 1;
-                    }
-                    let theme = plugins.theme();
-                    let titles: Vec<String> = tabs.iter().map(|t| t.tab_title().to_string()).collect();
-                    render_tab_bar(&mut stdout, &theme, &titles, active_tab, host_cols)?;
-                    let tab = &mut tabs[active_tab];
-                    tab.render_cache.initialized = false;
-                    render(&mut stdout, &tab.state, &mut tab.render_cache, CONTENT_ROW_OFFSET)?;
-                    stdout.flush()?;
-                    did_work = true;
-                } else {
-                    let tab = &mut tabs[active_tab];
-                    finalize_terminal_stream(&mut stdout, &mut tab.state, &mut tab.render_cache, CONTENT_ROW_OFFSET)?;
-                    return Ok(code.unwrap_or(1));
-                }
-            }
-            Some(EndpointEvent::Disconnected { reason }) => {
-                let tab = &mut tabs[active_tab];
-                finalize_terminal_stream(&mut stdout, &mut tab.state, &mut tab.render_cache, CONTENT_ROW_OFFSET)?;
-                return Err(io::Error::new(io::ErrorKind::ConnectionAborted, reason).into());
-            }
-            None => {}
         }
 
         if !did_work {
@@ -1343,19 +1605,19 @@ mod tests {
         let mut cache = RenderCache::default();
 
         let mut full_output = Vec::new();
-        let full = render(&mut full_output, &state, &mut cache, 0).unwrap();
+        let full = render(&mut full_output, &state, &mut cache, 0, 0).unwrap();
         assert!(full.full_redraw);
         assert_eq!(full.cells_emitted, 80 * 24);
 
         state.feed(b"x");
         let mut damage_output = Vec::new();
-        let damage = render(&mut damage_output, &state, &mut cache, 0).unwrap();
+        let damage = render(&mut damage_output, &state, &mut cache, 0, 0).unwrap();
         assert!(!damage.full_redraw);
         assert_eq!(damage.cells_emitted, 1);
         assert!(damage_output.len() * 10 < full_output.len());
 
         let mut unchanged_output = Vec::new();
-        let unchanged = render(&mut unchanged_output, &state, &mut cache, 0).unwrap();
+        let unchanged = render(&mut unchanged_output, &state, &mut cache, 0, 0).unwrap();
         assert_eq!(unchanged.cells_emitted, 0);
         assert!(unchanged_output.is_empty());
     }
@@ -1365,11 +1627,11 @@ mod tests {
         let size = EndpointSize::new(8, 4).unwrap();
         let mut state = TerminalState::new(size, 0);
         let mut cache = RenderCache::default();
-        render(&mut Vec::new(), &state, &mut cache, 0).unwrap();
+        render(&mut Vec::new(), &state, &mut cache, 0, 0).unwrap();
 
         state.feed(b"\x1b[3;4H");
         let mut output = Vec::new();
-        let render_result = render(&mut output, &state, &mut cache, 0).unwrap();
+        let render_result = render(&mut output, &state, &mut cache, 0, 0).unwrap();
         assert_eq!(render_result.cells_emitted, 0);
         assert!(!output.is_empty());
     }
@@ -1379,11 +1641,11 @@ mod tests {
         let size = EndpointSize::new(4, 1).unwrap();
         let mut state = TerminalState::new(size, 0);
         let mut cache = RenderCache::default();
-        render(&mut Vec::new(), &state, &mut cache, 0).unwrap();
+        render(&mut Vec::new(), &state, &mut cache, 0, 0).unwrap();
 
         state.feed("界".as_bytes());
         let mut wide_output = Vec::new();
-        let wide = render(&mut wide_output, &state, &mut cache, 0).unwrap();
+        let wide = render(&mut wide_output, &state, &mut cache, 0, 0).unwrap();
         assert_eq!(wide.cells_emitted, 1);
         assert!(
             wide_output
@@ -1393,7 +1655,7 @@ mod tests {
 
         state.feed(b"\rA");
         let mut narrow_output = Vec::new();
-        let narrow = render(&mut narrow_output, &state, &mut cache, 0).unwrap();
+        let narrow = render(&mut narrow_output, &state, &mut cache, 0, 0).unwrap();
         assert_eq!(narrow.cells_emitted, 2);
         assert!(narrow_output.contains(&b'A'));
     }
@@ -1402,10 +1664,10 @@ mod tests {
     fn damage_renderer_forces_full_redraw_on_resize() {
         let mut state = TerminalState::new(EndpointSize::new(4, 2).unwrap(), 0);
         let mut cache = RenderCache::default();
-        render(&mut Vec::new(), &state, &mut cache, 0).unwrap();
+        render(&mut Vec::new(), &state, &mut cache, 0, 0).unwrap();
 
         state.resize(EndpointSize::new(6, 3).unwrap());
-        let render_result = render(&mut Vec::new(), &state, &mut cache, 0).unwrap();
+        let render_result = render(&mut Vec::new(), &state, &mut cache, 0, 0).unwrap();
         assert!(render_result.full_redraw);
         assert_eq!(render_result.cells_emitted, 18);
     }
@@ -1415,15 +1677,15 @@ mod tests {
         let size = EndpointSize::new(6, 2).unwrap();
         let mut state = TerminalState::new(size, 0);
         let mut cache = RenderCache::default();
-        render(&mut Vec::new(), &state, &mut cache, 0).unwrap();
+        render(&mut Vec::new(), &state, &mut cache, 0, 0).unwrap();
 
         state.feed(b"\x1b[41mAB\x1b[2K");
-        let bce = render(&mut Vec::new(), &state, &mut cache, 0).unwrap();
+        let bce = render(&mut Vec::new(), &state, &mut cache, 0, 0).unwrap();
         assert!(!bce.full_redraw);
         assert!(bce.cells_emitted >= usize::from(size.cols));
 
         state.feed(b"\x1b[?1049h");
-        let alternate = render(&mut Vec::new(), &state, &mut cache, 0).unwrap();
+        let alternate = render(&mut Vec::new(), &state, &mut cache, 0, 0).unwrap();
         assert!(!alternate.full_redraw);
         assert!(alternate.cells_emitted >= usize::from(size.cols));
     }
@@ -1433,11 +1695,11 @@ mod tests {
         let size = EndpointSize::new(4, 2).unwrap();
         let mut state = TerminalState::new(size, 0);
         let mut cache = RenderCache::default();
-        render(&mut Vec::new(), &state, &mut cache, 0).unwrap();
+        render(&mut Vec::new(), &state, &mut cache, 0, 0).unwrap();
         state.feed(b"A\xe2\x98");
 
         let mut output = Vec::new();
-        finalize_terminal_stream(&mut output, &mut state, &mut cache, 0).unwrap();
+        finalize_terminal_stream(&mut output, &mut state, &mut cache, 0, 0).unwrap();
         assert_eq!(state.cell(0, 0).unwrap().character, 'A');
         assert_eq!(state.cell(0, 1).unwrap().character, '\u{fffd}');
         assert!(!output.is_empty());

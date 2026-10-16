@@ -4,22 +4,25 @@
 -- Edit this file and changes take effect immediately (hot reload).
 -- No rebuild needed.
 
--- Theme: dark, muted, refined. Inspired by lite's aesthetic.
+-- Theme: lite's EXACT palette from data/core/style.lua.
+-- background #2e2e32, background2 #252529, text #97979c,
+-- accent #e1e1e6, dim #525257, divider #202024,
+-- line_highlight #343438, caret #93DDFA.
 terminal.set_theme({
-    background = "#1a1a1e",
-    foreground = "#d8d8d8",
-    tab_active_bg = "#2d2d32",
-    tab_active_fg = "#ffffff",
-    tab_inactive_bg = "#1a1a1e",
-    tab_inactive_fg = "#808080",
-    status_bg = "#252528",
-    status_fg = "#a0a0a0",
-    palette_bg = "#1e1e22",
-    palette_fg = "#d8d8d8",
-    palette_selected_bg = "#3d3d42",
-    palette_selected_fg = "#ffffff",
-    border = "#3a3a3e",
-    accent = "#7aa2f7",
+    background = "#2e2e32",
+    foreground = "#97979c",
+    tab_active_bg = "#2e2e32",
+    tab_active_fg = "#97979c",
+    tab_inactive_bg = "#252529",
+    tab_inactive_fg = "#525257",
+    status_bg = "#252529",
+    status_fg = "#97979c",
+    palette_bg = "#252529",
+    palette_fg = "#97979c",
+    palette_selected_bg = "#343438",
+    palette_selected_fg = "#e1e1e6",
+    border = "#202024",
+    accent = "#93DDFA",
 })
 
 -- Keybindings
@@ -30,11 +33,23 @@ terminal.bind("ctrl+shift+tab", function() terminal.prev_tab() end)
 terminal.bind("ctrl+shift+p", function() terminal.palette() end)
 terminal.bind("ctrl+q", function() terminal.quit() end)
 
+-- Split panes: keyboard-driven, no chrome. Focus follows the new pane.
+terminal.bind("ctrl+shift+e", function() terminal.split_horizontal() end)
+terminal.bind("ctrl+shift+o", function() terminal.split_vertical() end)
+terminal.bind("ctrl+shift+w", function() terminal.close_pane() end)
+terminal.bind("ctrl+shift+]", function() terminal.next_pane() end)
+terminal.bind("ctrl+shift+[", function() terminal.prev_pane() end)
+
 -- Commands for the palette (ctrl+shift+p)
 terminal.command("tab:new", "New Tab", function() terminal.new_tab() end)
 terminal.command("tab:close", "Close Tab", function() terminal.close_tab() end)
 terminal.command("tab:next", "Next Tab", function() terminal.next_tab() end)
 terminal.command("tab:prev", "Previous Tab", function() terminal.prev_tab() end)
+terminal.command("pane:split-horizontal", "Split Pane Horizontally", function() terminal.split_horizontal() end)
+terminal.command("pane:split-vertical", "Split Pane Vertically", function() terminal.split_vertical() end)
+terminal.command("pane:close", "Close Pane", function() terminal.close_pane() end)
+terminal.command("pane:next", "Next Pane", function() terminal.next_pane() end)
+terminal.command("pane:prev", "Previous Pane", function() terminal.prev_pane() end)
 terminal.command("app:quit", "Quit", function() terminal.quit() end)
 
 terminal.log("default config loaded")

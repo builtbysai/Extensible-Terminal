@@ -32,6 +32,11 @@ pub enum PluginAction {
     SetStatusMessage(String),
     ClearStatusMessage,
     OpenPalette,
+    SplitHorizontal,
+    SplitVertical,
+    ClosePane,
+    NextPane,
+    PrevPane,
     Quit,
 }
 
@@ -97,22 +102,25 @@ pub struct Theme {
 }
 
 impl Default for Theme {
-    /// lite-inspired default: dark, muted, refined.
+    /// lite's EXACT palette from data/core/style.lua:
+    /// background #2e2e32, background2 #252529, text #97979c,
+    /// accent #e1e1e6, dim #525257, divider #202024,
+    /// line_highlight #343438, caret #93DDFA.
     fn default() -> Self {
         Self {
-            background: "#1a1a1e".to_string(),
-            foreground: "#d8d8d8".to_string(),
-            tab_active_bg: "#2d2d32".to_string(),
-            tab_active_fg: "#ffffff".to_string(),
-            tab_inactive_bg: "#1a1a1e".to_string(),
-            tab_inactive_fg: "#808080".to_string(),
-            status_bg: "#252528".to_string(),
-            status_fg: "#a0a0a0".to_string(),
-            palette_bg: "#1e1e22".to_string(),
-            palette_fg: "#d8d8d8".to_string(),
-            palette_selected_bg: "#3d3d42".to_string(),
-            palette_selected_fg: "#ffffff".to_string(),
-            border: "#3a3a3e".to_string(),
+            background: "#2e2e32".to_string(),
+            foreground: "#97979c".to_string(),
+            tab_active_bg: "#2e2e32".to_string(),
+            tab_active_fg: "#97979c".to_string(),
+            tab_inactive_bg: "#252529".to_string(),
+            tab_inactive_fg: "#525257".to_string(),
+            status_bg: "#252529".to_string(),
+            status_fg: "#97979c".to_string(),
+            palette_bg: "#252529".to_string(),
+            palette_fg: "#97979c".to_string(),
+            palette_selected_bg: "#343438".to_string(),
+            palette_selected_fg: "#e1e1e6".to_string(),
+            border: "#202024".to_string(),
             accent: "#7aa2f7".to_string(),
         }
     }
@@ -436,6 +444,11 @@ impl PluginManager {
         queue_action!("close_tab", PluginAction::CloseTab);
         queue_action!("next_tab", PluginAction::NextTab);
         queue_action!("prev_tab", PluginAction::PrevTab);
+        queue_action!("split_horizontal", PluginAction::SplitHorizontal);
+        queue_action!("split_vertical", PluginAction::SplitVertical);
+        queue_action!("close_pane", PluginAction::ClosePane);
+        queue_action!("next_pane", PluginAction::NextPane);
+        queue_action!("prev_pane", PluginAction::PrevPane);
         queue_action!("quit", PluginAction::Quit);
         queue_action!("clear_status", PluginAction::ClearStatusMessage);
         queue_action!("palette", PluginAction::OpenPalette);
@@ -520,8 +533,8 @@ mod tests {
     #[test]
     fn default_theme_is_dark() {
         let theme = Theme::default();
-        assert_eq!(theme.background, "#1a1a1e");
-        assert_eq!(theme.foreground, "#d8d8d8");
+        assert_eq!(theme.background, "#2e2e32");
+        assert_eq!(theme.foreground, "#97979c");
     }
 
     #[test]
@@ -589,7 +602,7 @@ mod tests {
 
         assert_eq!(manager.theme().background, "#000000");
         assert_eq!(manager.theme().accent, "#ff0000");
-        assert_eq!(manager.theme().foreground, "#d8d8d8");
+        assert_eq!(manager.theme().foreground, "#97979c");
 
         let _ = fs::remove_dir_all(&dir);
     }
