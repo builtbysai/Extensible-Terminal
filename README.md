@@ -203,6 +203,13 @@ terminal.next_tab()     -- Switch to next tab
 terminal.prev_tab()     -- Switch to previous tab
 terminal.rename_tab("name")
 
+-- Panes (keyboard-driven splits, no chrome)
+terminal.split_horizontal()  -- Split focused pane, stacked
+terminal.split_vertical()    -- Split focused pane, side by side
+terminal.close_pane()        -- Close focused pane
+terminal.next_pane()         -- Focus next pane
+terminal.prev_pane()         -- Focus previous pane
+
 -- Palette
 terminal.palette()      -- Open command palette
 
@@ -224,6 +231,11 @@ terminal.quit()                -- Quit the terminal
 | `ctrl+tab` | Next tab |
 | `ctrl+shift+tab` | Previous tab |
 | `ctrl+shift+p` | Command palette |
+| `ctrl+shift+e` | Split pane horizontally (stacked) |
+| `ctrl+shift+o` | Split pane vertically (side by side) |
+| `ctrl+shift+w` | Close pane |
+| `ctrl+shift+]` | Next pane |
+| `ctrl+shift+[` | Previous pane |
 | `ctrl+q` | Quit |
 
 ### Example Plugins
